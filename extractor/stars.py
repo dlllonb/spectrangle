@@ -1,6 +1,11 @@
 """
 stars.py — Point-source extraction for plate-solving.
 
+Phase 1 of the pipeline: detects stellar point sources from a raw image so
+that the source list can be submitted to nova.astrometry.net by platesolve.py.
+This is an *initialization* step; the resulting WCS is not the final precision
+distortion model.
+
 Two-stage pipeline:
   1. Build a mask of elongated diffraction features so they are not mistaken
      for stars and do not inflate the background noise estimate.

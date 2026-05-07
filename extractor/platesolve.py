@@ -1,7 +1,14 @@
 """
-platesolve.py — Submit a FITS image to nova.astrometry.net and return a
-PlatesolveResult containing the WCS header, source positions, and the full
-astrometry.net product bundle (corr, axy, rdls, image_rd tables).
+platesolve.py — Phase 1 general plate-solving via nova.astrometry.net.
+
+This module is the second step of the preliminary astrometry phase:
+  stars.extract_stars()  →  platesolve()  →  working/general_platesolve/
+
+It submits a source list, retrieves a broad field solution, and saves the
+astrometry.net product bundle (WCS header, corr/axy/rdls/image_rd tables)
+to a `working/` checkpoint directory.  The resulting WCS is suitable for
+rough field identification and as a starting point for a later custom
+distortion model; it is **not** the final precision WCS.
 
 Astrometry.net product URLs
 ----------------------------
@@ -506,6 +513,176 @@ def platesolve(
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         with open(cache_path, "wb") as _fh:
             pickle.dump(result, _fh)
+        if verbose:
+            print(f"Result cached to {cache_path.name}")
+
+    return result
+
+
+def platesolve_xylist(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    image_width: int,
+    image_height: int,
+    original_header: Optional[fits.Header] = None,
+    hints: Optional[dict] = None,
+    api_key_file: Optional[Union[str, Path]] = None,
+    timeout: int = _DEFAULT_TIMEOUT,
+    verbose: bool = True,
+    cache: Union[bool, Path] = False,
+    fetch_products: bool = True,
+    save_products_dir: Optional[Union[str, Path]] = None,
+) -> Optional["PlatesolveResult"]:
+    """Plate-solve a custom source list via nova.astrometry.net.
+
+    Like ``platesolve()`` but accepts explicit pixel coordinates instead of
+    extracting sources from a FITS image.  Useful for submitting spatial
+    subsets or pre-filtered source lists while keeping the original detector
+    coordinate frame.
+
+    Parameters
+    ----------
+    xs, ys : array-like
+        Source x/y positions in full-image pixel coordinates.
+    image_width, image_height : int
+        Full image dimensions.  Always pass the *original* frame size even
+        when xs/ys cover only a sub-region — astrometry.net needs the full
+        extent to interpret the pixel coordinates correctly.
+    original_header : fits.Header, optional
+        FITS header from the original image; WCS keywords from the solution
+        are merged into a copy of this header.  If None, a minimal header
+        is used.
+    hints : dict, optional
+        Astrometry.net submission hints.  Useful keys::
+            center_ra, center_dec, radius      – sky position hint
+            scale_lower, scale_upper, scale_units – plate scale hint
+    cache : Path
+        If a Path, load from / save to that pickle path.
+    fetch_products, save_products_dir : same as ``platesolve()``.
+    """
+    cache_path: Optional[Path] = None
+    if cache and cache is not True:
+        cache_path = Path(cache)
+
+    if cache_path is not None and cache_path.exists():
+        if verbose:
+            print(f"Loading cached result from {cache_path.name}")
+        with open(cache_path, "rb") as fh:
+            return pickle.load(fh)
+
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    if len(xs) == 0:
+        if verbose:
+            print("No sources provided — cannot submit.")
+        return None
+
+    api_key = _read_key(Path(api_key_file) if api_key_file else _DEFAULT_KEY_FILE)
+    http_sess, api_session = _login(api_key, verbose)
+
+    if verbose:
+        print(f"Submitting {len(xs)} sources  ({image_width}x{image_height} frame).")
+
+    _hints: dict = dict(hints) if hints else {}
+    sub_id = _upload_xylist(
+        http_sess, api_session,
+        make_xylist(xs, ys),
+        image_width, image_height,
+        _hints, verbose,
+    )
+
+    job_id = _await_job(http_sess, sub_id, timeout, verbose)
+    if job_id is None:
+        return None
+    if not _await_solve(http_sess, job_id, timeout, verbose):
+        return None
+
+    wcs_header = _fetch_wcs(http_sess, job_id, verbose)
+    if wcs_header is None:
+        return None
+
+    # Fetch optional products
+    product_urls: dict = {}
+    fetch_status: dict = {}
+    corr_table = axy_table = rdls_table = image_radec_table = None
+
+    save_dir = Path(save_products_dir) if save_products_dir else None
+    if save_dir is not None:
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+    if fetch_products:
+        if verbose:
+            print("Fetching products:")
+        for name in _TABLE_PRODUCTS:
+            url = _PRODUCT_URLS[name].format(job_id=job_id)
+            product_urls[name] = url
+            table, raw, status = _fetch_fits_table_product(
+                url, name, verbose=verbose, http_sess=http_sess
+            )
+            fetch_status[name] = status
+            if status != "ok" and verbose:
+                print(f"  {name:10s}: FAILED — {status}")
+            if raw is not None and save_dir is not None:
+                (save_dir / _PRODUCT_FILENAMES[name]).write_bytes(raw)
+            if name == "corr":
+                corr_table = table
+            elif name == "axy":
+                axy_table = table
+            elif name == "rdls":
+                rdls_table = table
+            elif name == "image_rd":
+                image_radec_table = table
+
+    matched_x = matched_y = np.array([])
+    if corr_table is not None:
+        fx = _col_array(corr_table, "field_x")
+        fy = _col_array(corr_table, "field_y")
+        if len(fx) > 0:
+            matched_x, matched_y = fx, fy
+
+    if save_dir is not None:
+        metadata: dict = {
+            "submission_id": sub_id,
+            "job_id": job_id,
+            "status": "success",
+            "image_shape": [int(image_height), int(image_width)],
+            "n_submitted": int(len(xs)),
+            "n_matched": int(len(matched_x)),
+            "hints": _hints,
+            "fetch_status": fetch_status,
+            "product_urls": product_urls,
+        }
+        (save_dir / "solve_metadata.json").write_text(
+            json.dumps(metadata, indent=2), encoding="utf-8"
+        )
+        if verbose:
+            print(f"Products saved to {save_dir}/")
+
+    base_header = original_header.copy() if original_header is not None else fits.Header()
+    merged_header = _merge_wcs(base_header, wcs_header)
+
+    result = PlatesolveResult(
+        header=merged_header,
+        detected_x=xs,
+        detected_y=ys,
+        matched_x=matched_x,
+        matched_y=matched_y,
+        submission_id=sub_id,
+        job_id=job_id,
+        status="success",
+        corr_table=corr_table,
+        axy_table=axy_table,
+        rdls_table=rdls_table,
+        image_radec_table=image_radec_table,
+        wcs_header_raw=wcs_header,
+        product_urls=product_urls,
+        fetch_status=fetch_status,
+    )
+
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "wb") as fh:
+            pickle.dump(result, fh)
         if verbose:
             print(f"Result cached to {cache_path.name}")
 
