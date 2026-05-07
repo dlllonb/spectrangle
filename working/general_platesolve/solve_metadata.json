@@ -1,0 +1,28 @@
+{
+  "submission_id": 14945354,
+  "job_id": 15781285,
+  "status": "success",
+  "image_path": "C:\\Users\\bassd\\Research\\Spectra Angle\\spectrangle\\data\\fuji6_asi178_100_15s.fit",
+  "image_shape": [
+    2080,
+    3096
+  ],
+  "n_submitted": 255,
+  "n_matched": 48,
+  "use_source_list": true,
+  "max_sources": 300,
+  "mask_spectra": true,
+  "hints": {},
+  "fetch_status": {
+    "corr": "ok",
+    "axy": "ok",
+    "rdls": "ok",
+    "image_rd": "ok"
+  },
+  "product_urls": {
+    "corr": "https://nova.astrometry.net/corr_file/15781285",
+    "axy": "https://nova.astrometry.net/axy_file/15781285",
+    "rdls": "https://nova.astrometry.net/rdls_file/15781285",
+    "image_rd": "https://nova.astrometry.net/image_rd_file/15781285"
+  }
+}
