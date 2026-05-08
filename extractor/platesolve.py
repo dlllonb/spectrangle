@@ -318,6 +318,8 @@ def platesolve(
     search_radius_deg: float = 5.0,
     scale_arcsec_per_px: Optional[float] = None,
     scale_tolerance: float = 0.25,
+    tweak_order: Optional[int] = None,
+    crpix_center: bool = False,
     api_key_file: Optional[Union[str, Path]] = None,
     timeout: int = _DEFAULT_TIMEOUT,
     verbose: bool = True,
@@ -347,6 +349,13 @@ def platesolve(
         Approximate plate scale; ±scale_tolerance band used as a hint.
     scale_tolerance : float
         Fractional tolerance on the scale hint. Default 0.25 (±25%).
+    tweak_order : int, optional
+        SIP polynomial order for astrometry.net's --tweak-order option.
+        If None (default), the server chooses (currently order 2).
+        Pass 3, 4, or 5 to request higher-order distortion fits.
+    crpix_center : bool
+        If True, request that astrometry.net place CRPIX at the image
+        center rather than at the reference quad centroid. Default False.
     api_key_file : path-like, optional
         Text file containing the nova.astrometry.net API key.
     timeout : int
@@ -392,6 +401,10 @@ def platesolve(
         hints.update(scale_lower=scale_arcsec_per_px * (1 - scale_tolerance),
                      scale_upper=scale_arcsec_per_px * (1 + scale_tolerance),
                      scale_units="arcsecperpix")
+    if tweak_order is not None:
+        hints["tweak_order"] = int(tweak_order)
+    if crpix_center:
+        hints["crpix_center"] = True
 
     # Login creates a requests.Session so the Django session cookie is preserved
     # for all subsequent calls, including corr_file which requires authentication.
@@ -481,6 +494,8 @@ def platesolve(
             "use_source_list": use_source_list,
             "max_sources":   max_sources,
             "mask_spectra":  mask_spectra,
+            "tweak_order":   tweak_order,
+            "crpix_center":  crpix_center,
             "hints":         hints,
             "fetch_status":  fetch_status,
             "product_urls":  product_urls,

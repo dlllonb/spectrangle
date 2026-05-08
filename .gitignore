@@ -57,6 +57,7 @@ data/
 # Outputs (generated figures/results — commit selectively)
 outputs/
 out/
+working/
 
 # Secrets / keys
 *.txt
