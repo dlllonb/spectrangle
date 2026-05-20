@@ -39,6 +39,9 @@ from __future__ import annotations
 import io
 import json
 import pickle
+import shutil
+import subprocess
+import tempfile
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -86,6 +89,36 @@ _PRODUCT_FILENAMES: dict[str, str] = {
     "image_rd":  "image-radec.fits",
     "new_image": "new-image.fits",
 }
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+class PlateSolveError(Exception):
+    """Raised when plate-solving fails."""
+
+
+class LocalSolveFieldError(PlateSolveError):
+    """Raised when local solve-field is unavailable or produces no solution.
+
+    If you see this on Windows/non-WSL:
+      - Switch to backend='remote', or
+      - Run the notebook from the 'Python (spectrangle WSL)' Jupyter kernel.
+    If you see this on Linux/WSL:
+      - Confirm solve-field is installed: sudo apt install astrometry.net
+      - Confirm it is on PATH: which solve-field
+    """
+
+
+# ---------------------------------------------------------------------------
+# Local solve-field defaults (notebook can override via function parameters)
+# ---------------------------------------------------------------------------
+
+_LOCAL_DEFAULT_SCALE_UNITS: str  = "arcsecperpix"
+_LOCAL_DEFAULT_SCALE_LOW:   float = 70.0
+_LOCAL_DEFAULT_SCALE_HIGH:  float = 95.0
+_LOCAL_DEFAULT_TWEAK_ORDER: int   = 5
 
 
 # ---------------------------------------------------------------------------
@@ -954,3 +987,399 @@ def _read_key(path: Path) -> str:
     if not key:
         raise ValueError(f"API key file is empty: {path}")
     return key
+
+
+# ---------------------------------------------------------------------------
+# Local solve-field backend
+# ---------------------------------------------------------------------------
+
+def solve_plate_local(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    image_width: int,
+    image_height: int,
+    original_header: Optional[fits.Header] = None,
+    backend_config: Optional[Union[str, Path]] = None,
+    scale_units: str = _LOCAL_DEFAULT_SCALE_UNITS,
+    scale_low: float = _LOCAL_DEFAULT_SCALE_LOW,
+    scale_high: float = _LOCAL_DEFAULT_SCALE_HIGH,
+    tweak_order: int = _LOCAL_DEFAULT_TWEAK_ORDER,
+    output_dir: Optional[Union[str, Path]] = None,
+    timeout: int = _DEFAULT_TIMEOUT,
+    overwrite: bool = True,
+    no_plots: bool = True,
+    verbose: bool = True,
+    cache: Union[bool, Path] = False,
+) -> Optional[PlatesolveResult]:
+    """Plate-solve a source list via local solve-field.
+
+    Requires astrometry.net's ``solve-field`` to be installed and on PATH.
+    Typically available in Ubuntu/WSL (``sudo apt install astrometry.net``).
+    If solve-field is not found, a :class:`LocalSolveFieldError` is raised
+    immediately — this function never silently falls back to remote solving.
+
+    Parameters
+    ----------
+    xs, ys : array-like
+        Source x/y pixel positions (0-based, full image coordinates).
+    image_width, image_height : int
+        Full image dimensions passed to solve-field via --width / --height.
+    original_header : fits.Header, optional
+        FITS header from the original image; WCS keywords merged into a copy.
+    backend_config : path-like, optional
+        Path to the astrometry.net backend.cfg.  If None, solve-field uses
+        its compiled-in default.  For index files on Windows drives under WSL,
+        pass the explicit path, e.g.
+        ``"/mnt/c/Users/<user>/.astrometry/backend.cfg"``.
+    scale_units : str
+        --scale-units value.  Default "arcsecperpix".
+    scale_low, scale_high : float
+        Scale bounds (--scale-low, --scale-high).
+        ASI178MC + 6 mm lens defaults: 70–95 arcsec/px.
+    tweak_order : int
+        SIP polynomial order (--tweak-order).  Default 5.
+    output_dir : path-like, optional
+        Directory for all solve-field output files (xylist.wcs, .corr, etc.).
+        Created if it does not exist.  If None, a temporary directory is used.
+    timeout : int
+        Seconds to wait before killing solve-field.  Default 300.
+    overwrite : bool
+        Pass --overwrite so an existing .wcs is replaced.  Default True.
+    no_plots : bool
+        Pass --no-plots to suppress PDF/PNG output.  Default True.
+    verbose : bool
+        Print the exact solve-field command and a tail of its output.
+    cache : bool or Path
+        If a Path, save / load the result as a pickle so a re-run skips
+        solve-field.
+
+    Returns
+    -------
+    PlatesolveResult or None
+        None if solve-field ran but produced no .wcs (e.g., no solution found).
+
+    Raises
+    ------
+    LocalSolveFieldError
+        If solve-field is not on PATH, or if it raises an unexpected error.
+    """
+    cache_path: Optional[Path] = None
+    if cache and cache is not True:
+        cache_path = Path(cache)
+    if cache_path is not None and cache_path.exists():
+        if verbose:
+            print(f"Loading cached local result from {cache_path.name}")
+        with open(cache_path, "rb") as fh:
+            return pickle.load(fh)
+
+    sf_path = shutil.which("solve-field")
+    if sf_path is None:
+        raise LocalSolveFieldError(
+            "solve-field not found on PATH.\n"
+            "Local plate-solving requires astrometry.net's solve-field:\n"
+            "  Ubuntu/WSL:  sudo apt install astrometry.net\n"
+            "  macOS:       brew install astrometry-net\n"
+            "If running from a Windows kernel, switch to backend='remote' or\n"
+            "use the 'Python (spectrangle WSL)' Jupyter kernel instead."
+        )
+
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    if len(xs) == 0:
+        if verbose:
+            print("No sources provided — cannot solve.")
+        return None
+
+    if output_dir is None:
+        output_dir = Path(tempfile.mkdtemp(prefix="spectrangle_solve_"))
+    else:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    xylist_path = output_dir / "xylist.fits"
+    xylist_buf = make_xylist(xs, ys)
+    xylist_path.write_bytes(xylist_buf.getvalue())
+
+    if verbose:
+        print(f"Wrote {len(xs)} sources → {xylist_path}")
+
+    cmd = [
+        sf_path, str(xylist_path),
+        "--width",       str(int(image_width)),
+        "--height",      str(int(image_height)),
+        "--scale-units", scale_units,
+        "--scale-low",   str(scale_low),
+        "--scale-high",  str(scale_high),
+        "--tweak-order", str(int(tweak_order)),
+        "--dir",         str(output_dir),
+    ]
+    if backend_config is not None:
+        cmd.extend(["--backend-config", str(backend_config)])
+    if overwrite:
+        cmd.append("--overwrite")
+    if no_plots:
+        cmd.append("--no-plots")
+
+    if verbose:
+        print("Running:", " ".join(cmd))
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise LocalSolveFieldError(
+            f"solve-field timed out after {timeout}s.\n"
+            f"Output directory: {output_dir}"
+        )
+
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+
+    if verbose:
+        combined = (stdout + stderr).strip().splitlines()
+        for line in combined[-30:]:
+            print(" ", line)
+
+    wcs_path = output_dir / "xylist.wcs"
+    if not wcs_path.exists():
+        raise LocalSolveFieldError(
+            f"solve-field produced no .wcs file — solve likely failed.\n"
+            f"Expected:      {wcs_path}\n"
+            f"Return code:   {proc.returncode}\n"
+            f"Output dir:    {output_dir}\n"
+            f"--- stdout (tail) ---\n{stdout[-2000:]}\n"
+            f"--- stderr (tail) ---\n{stderr[-2000:]}"
+        )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with fits.open(str(wcs_path)) as hdul:
+            wcs_header = hdul[0].header.copy()
+
+    if verbose:
+        print(f"WCS loaded from {wcs_path}")
+
+    corr_table  = _read_local_fits_table(output_dir / "xylist.corr",  "corr",  verbose)
+    axy_table   = _read_local_fits_table(output_dir / "xylist.axy",   "axy",   verbose)
+    rdls_table  = _read_local_fits_table(output_dir / "xylist.rdls",  "rdls",  verbose)
+
+    matched_x = matched_y = np.array([])
+    if corr_table is not None:
+        fx = _col_array(corr_table, "field_x")
+        fy = _col_array(corr_table, "field_y")
+        if len(fx) > 0:
+            matched_x, matched_y = fx, fy
+
+    base_header    = original_header.copy() if original_header is not None else fits.Header()
+    merged_header  = _merge_wcs(base_header, wcs_header)
+
+    fetch_status = {
+        "corr": "ok" if corr_table is not None else "not found",
+        "axy":  "ok" if axy_table  is not None else "not found",
+        "rdls": "ok" if rdls_table is not None else "not found",
+    }
+
+    result = PlatesolveResult(
+        header=merged_header,
+        detected_x=xs,
+        detected_y=ys,
+        matched_x=matched_x,
+        matched_y=matched_y,
+        submission_id=None,
+        job_id=None,
+        status="success",
+        corr_table=corr_table,
+        axy_table=axy_table,
+        rdls_table=rdls_table,
+        image_radec_table=None,
+        wcs_header_raw=wcs_header,
+        product_urls={},
+        fetch_status=fetch_status,
+    )
+
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "wb") as fh:
+            pickle.dump(result, fh)
+        if verbose:
+            print(f"Result cached to {cache_path.name}")
+
+    return result
+
+
+def _read_local_fits_table(
+    path: Path, product: str, verbose: bool
+) -> Optional[Table]:
+    """Read a FITS binary table file produced by solve-field, or return None."""
+    if not path.exists():
+        return None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with fits.open(str(path)) as hdul:
+                table_hdu = next(
+                    (h for h in hdul
+                     if isinstance(h, (fits.BinTableHDU, fits.TableHDU))),
+                    None,
+                )
+                if table_hdu is None:
+                    return None
+                return Table(table_hdu.data)
+    except Exception as exc:
+        if verbose:
+            print(f"  Warning: could not read {product} table from {path}: {exc}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Remote backend wrapper
+# ---------------------------------------------------------------------------
+
+def solve_plate_remote(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    image_width: int,
+    image_height: int,
+    original_header: Optional[fits.Header] = None,
+    hints: Optional[dict] = None,
+    api_key_file: Optional[Union[str, Path]] = None,
+    timeout: int = _DEFAULT_TIMEOUT,
+    verbose: bool = True,
+    cache: Union[bool, Path] = False,
+    fetch_products: bool = True,
+    save_products_dir: Optional[Union[str, Path]] = None,
+    _http_sess: Optional[requests.Session] = None,
+    _api_session: Optional[str] = None,
+) -> Optional[PlatesolveResult]:
+    """Plate-solve a source list via nova.astrometry.net (remote backend).
+
+    Thin wrapper around :func:`platesolve_xylist` with a signature
+    consistent with :func:`solve_plate_local` for use via :func:`solve_plate`.
+    """
+    return platesolve_xylist(
+        xs=xs, ys=ys,
+        image_width=image_width, image_height=image_height,
+        original_header=original_header,
+        hints=hints,
+        api_key_file=api_key_file,
+        timeout=timeout,
+        verbose=verbose,
+        cache=cache,
+        fetch_products=fetch_products,
+        save_products_dir=save_products_dir,
+        _http_sess=_http_sess,
+        _api_session=_api_session,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Unified dispatcher
+# ---------------------------------------------------------------------------
+
+def solve_plate(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    image_width: int,
+    image_height: int,
+    original_header: Optional[fits.Header] = None,
+    backend: str = "remote",
+    # ---- local-only ----
+    backend_config: Optional[Union[str, Path]] = None,
+    scale_units: str = _LOCAL_DEFAULT_SCALE_UNITS,
+    scale_low: float = _LOCAL_DEFAULT_SCALE_LOW,
+    scale_high: float = _LOCAL_DEFAULT_SCALE_HIGH,
+    tweak_order: int = _LOCAL_DEFAULT_TWEAK_ORDER,
+    output_dir: Optional[Union[str, Path]] = None,
+    overwrite: bool = True,
+    no_plots: bool = True,
+    # ---- remote-only ----
+    hints: Optional[dict] = None,
+    api_key_file: Optional[Union[str, Path]] = None,
+    fetch_products: bool = True,
+    save_products_dir: Optional[Union[str, Path]] = None,
+    _http_sess: Optional[requests.Session] = None,
+    _api_session: Optional[str] = None,
+    # ---- shared ----
+    timeout: int = _DEFAULT_TIMEOUT,
+    verbose: bool = True,
+    cache: Union[bool, Path] = False,
+) -> Optional[PlatesolveResult]:
+    """Plate-solve a source list, routing to a local or remote backend.
+
+    Parameters
+    ----------
+    backend : {"local", "remote"}
+        ``"local"``  — use local ``solve-field`` (Linux/WSL, no internet needed).
+        ``"remote"`` — use nova.astrometry.net API (internet + API key required).
+    xs, ys : array-like
+        Source x/y pixel positions.
+    image_width, image_height : int
+        Full image dimensions.
+    backend_config : path-like, optional
+        (local only) Path to astrometry.net backend.cfg.
+    scale_units, scale_low, scale_high : str / float
+        (local only) Scale hint for solve-field.
+    tweak_order : int
+        (local only) SIP polynomial order.  Default 5.
+    output_dir : path-like, optional
+        (local only) Directory for solve-field output files.
+    hints : dict, optional
+        (remote only) nova.astrometry.net submission hints.
+    api_key_file : path-like, optional
+        (remote only) Path to API key file.
+    fetch_products : bool
+        (remote only) Fetch corr/axy/rdls/image_rd product tables.
+    timeout : int
+        Seconds to wait for a solution (shared).
+    verbose : bool
+        Print progress (shared).
+    cache : bool or Path
+        Pickle cache path (shared).
+
+    Returns
+    -------
+    PlatesolveResult or None
+        None if no solution was found.
+
+    Raises
+    ------
+    LocalSolveFieldError
+        If ``backend="local"`` and solve-field is missing or fails.
+    ValueError
+        If ``backend`` is not ``"local"`` or ``"remote"``.
+    """
+    if backend == "local":
+        return solve_plate_local(
+            xs=xs, ys=ys,
+            image_width=image_width, image_height=image_height,
+            original_header=original_header,
+            backend_config=backend_config,
+            scale_units=scale_units,
+            scale_low=scale_low,
+            scale_high=scale_high,
+            tweak_order=tweak_order,
+            output_dir=output_dir,
+            timeout=timeout,
+            overwrite=overwrite,
+            no_plots=no_plots,
+            verbose=verbose,
+            cache=cache,
+        )
+    elif backend == "remote":
+        return solve_plate_remote(
+            xs=xs, ys=ys,
+            image_width=image_width, image_height=image_height,
+            original_header=original_header,
+            hints=hints,
+            api_key_file=api_key_file,
+            timeout=timeout,
+            verbose=verbose,
+            cache=cache,
+            fetch_products=fetch_products,
+            save_products_dir=save_products_dir,
+            _http_sess=_http_sess,
+            _api_session=_api_session,
+        )
+    else:
+        raise ValueError(
+            f"Unknown backend {backend!r}. Choose 'local' or 'remote'."
+        )
