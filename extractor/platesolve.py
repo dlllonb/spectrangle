@@ -47,6 +47,8 @@ from typing import Optional, Union
 
 import numpy as np
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from astropy.io import fits
 from astropy.table import Table
 
@@ -55,6 +57,17 @@ from .stars import extract_stars, make_xylist
 _API_URL          = "https://nova.astrometry.net/api"
 _DEFAULT_TIMEOUT  = 300
 _POLL_INTERVAL    = 5
+
+# HTTP-level retry configuration mounted on every Session.
+# Retries GET/HEAD on connection drops and read errors; never retries POST
+# (uploads), so a dropped connection during xylist upload does not cause a
+# duplicate submission.  backoff_factor=2 → sleeps 2, 4, 8 s between attempts.
+_HTTP_RETRY = Retry(
+    connect=3,
+    read=3,
+    backoff_factor=2,
+    raise_on_status=False,
+)
 _DEFAULT_KEY_FILE = Path(__file__).parent.parent / "astrometry_api.txt"
 _SKIP_KEYS = frozenset({"SIMPLE", "BITPIX", "EXTEND", "END", "COMMENT", "HISTORY", ""})
 
@@ -547,6 +560,8 @@ def platesolve_xylist(
     cache: Union[bool, Path] = False,
     fetch_products: bool = True,
     save_products_dir: Optional[Union[str, Path]] = None,
+    _http_sess: Optional[requests.Session] = None,
+    _api_session: Optional[str] = None,
 ) -> Optional["PlatesolveResult"]:
     """Plate-solve a custom source list via nova.astrometry.net.
 
@@ -574,6 +589,14 @@ def platesolve_xylist(
     cache : Path
         If a Path, load from / save to that pickle path.
     fetch_products, save_products_dir : same as ``platesolve()``.
+    _http_sess : requests.Session, optional
+        Pre-authenticated session from :func:`create_session`.  When provided
+        together with ``_api_session``, the login step is skipped.  Use this
+        in tight loops (bootstrap, batch processing) to avoid N logins for N
+        calls and to prevent login-rate-limiting on nova.astrometry.net.
+    _api_session : str, optional
+        API session key returned by :func:`create_session` or a previous
+        :func:`platesolve_xylist` call.  Must be supplied with ``_http_sess``.
     """
     cache_path: Optional[Path] = None
     if cache and cache is not True:
@@ -592,8 +615,11 @@ def platesolve_xylist(
             print("No sources provided — cannot submit.")
         return None
 
-    api_key = _read_key(Path(api_key_file) if api_key_file else _DEFAULT_KEY_FILE)
-    http_sess, api_session = _login(api_key, verbose)
+    if _http_sess is not None and _api_session is not None:
+        http_sess, api_session = _http_sess, _api_session
+    else:
+        api_key = _read_key(Path(api_key_file) if api_key_file else _DEFAULT_KEY_FILE)
+        http_sess, api_session = _login(api_key, verbose)
 
     if verbose:
         print(f"Submitting {len(xs)} sources  ({image_width}x{image_height} frame).")
@@ -714,9 +740,17 @@ def _login(api_key: str, verbose: bool) -> tuple[requests.Session, str]:
     Creates a requests.Session so the Django session cookie persists across
     all subsequent HTTP calls.  The corr_file endpoint requires this cookie.
 
+    The session has an HTTP-level retry adapter mounted so that transient
+    connection drops during polling (RemoteDisconnected, ConnectionReset)
+    are retried automatically at the TCP/HTTP layer without triggering a
+    fresh xylist upload.  POST requests are never retried by this adapter.
+
     Returns (http_session, api_session_key).
     """
     http_sess = requests.Session()
+    _adapter = HTTPAdapter(max_retries=_HTTP_RETRY)
+    http_sess.mount("https://", _adapter)
+    http_sess.mount("http://", _adapter)
     r = http_sess.post(
         f"{_API_URL}/login",
         data={"request-json": json.dumps({"apikey": api_key})},
@@ -729,6 +763,24 @@ def _login(api_key: str, verbose: bool) -> tuple[requests.Session, str]:
     if verbose:
         print("Logged in to nova.astrometry.net")
     return http_sess, resp["session"]
+
+
+def create_session(
+    api_key_file: Optional[Union[str, Path]] = None,
+    verbose: bool = False,
+) -> tuple[requests.Session, str]:
+    """Login once and return ``(http_sess, api_session_key)`` for reuse.
+
+    Pass the returned pair to :func:`platesolve_xylist` as ``_http_sess``
+    and ``_api_session`` to share a single authenticated session across many
+    consecutive solve calls.  This avoids N logins for N bootstrap iterations
+    and eliminates the login-rate-limiting failure mode.
+
+    The session includes the same HTTP-level connection-retry adapter as an
+    internally-created session (see :func:`_login`).
+    """
+    api_key = _read_key(Path(api_key_file) if api_key_file else _DEFAULT_KEY_FILE)
+    return _login(api_key, verbose)
 
 
 def _upload_xylist(

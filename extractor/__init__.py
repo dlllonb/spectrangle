@@ -11,4 +11,11 @@ __description__ = "Diffraction/spectral trace orientation angle extraction from 
 # Phase 3 (planned): spectral trace angle extraction with per-trace WCS correction
 
 from .stars import extract_stars, make_xylist
-from .platesolve import platesolve, platesolve_xylist, PlatesolveResult, has_sip, wcs_summary
+from .platesolve import platesolve, platesolve_xylist, PlatesolveResult, has_sip, wcs_summary, create_session
+from .wcsangle import (
+    angle_diff_deg,
+    local_north_angle_deg,
+    local_east_angle_deg,
+    center_wcs_angle_metrics,
+    WcsAngleMetrics,
+)

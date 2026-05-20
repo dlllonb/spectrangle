@@ -1,0 +1,45 @@
+# spectrangle / grating_wcs_angle
+# Python >= 3.10 required (3.11+ recommended)
+#
+# Install into a venv on Ubuntu:
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#   pip install --upgrade pip
+#   pip install -r requirements.txt
+#
+# Register the venv as a Jupyter kernel:
+#   python -m ipykernel install --user --name spectrangle --display-name "spectrangle"
+#
+# solve-field is installed separately via apt (not pip):
+#   sudo apt install astrometry.net astrometry-data-tycho2
+#   (or the relevant index files for your sky region)
+
+# ── core science stack ────────────────────────────────────────────────────────
+numpy>=1.26
+scipy>=1.11
+astropy>=6.0
+scikit-image>=0.22
+
+# ── source detection ──────────────────────────────────────────────────────────
+# photutils 3.0 changed the DAOStarFinder API (sharpness_range / roundness_range
+# replace sharplo/sharphi); the code in stars.py detects the version at runtime.
+photutils>=3.0
+
+# ── plotting ──────────────────────────────────────────────────────────────────
+matplotlib>=3.8
+
+# ── notebook data wrangling ───────────────────────────────────────────────────
+pandas>=2.0
+
+# ── catalog / coordinate queries (notebooks) ──────────────────────────────────
+astroquery>=0.4.7
+
+# ── online astrometry.net HTTP client ────────────────────────────────────────
+# Retained for nova.astrometry.net fallback; not needed if using solve-field only.
+requests>=2.31
+# urllib3 is pulled in by requests; listed explicitly because platesolve.py
+# imports urllib3.util.retry.Retry directly.
+urllib3>=2.0
+
+# ── Jupyter kernel (register this venv with JupyterLab) ──────────────────────
+ipykernel>=6.29
