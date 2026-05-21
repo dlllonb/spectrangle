@@ -1010,6 +1010,7 @@ def solve_plate_local(
     no_plots: bool = True,
     verbose: bool = True,
     cache: Union[bool, Path] = False,
+    extra_args: Optional[list] = None,
 ) -> Optional[PlatesolveResult]:
     """Plate-solve a source list via local solve-field.
 
@@ -1052,6 +1053,11 @@ def solve_plate_local(
     cache : bool or Path
         If a Path, save / load the result as a pickle so a re-run skips
         solve-field.
+    extra_args : list of str, optional
+        Additional arguments appended verbatim to the solve-field command.
+        Useful for restricting to specific index files, e.g.::
+
+            extra_args=["--index", "/path/to/index-4117.fits"]
 
     Returns
     -------
@@ -1119,6 +1125,8 @@ def solve_plate_local(
         cmd.append("--overwrite")
     if no_plots:
         cmd.append("--no-plots")
+    if extra_args:
+        cmd.extend([str(a) for a in extra_args])
 
     if verbose:
         print("Running:", " ".join(cmd))
@@ -1291,6 +1299,7 @@ def solve_plate(
     output_dir: Optional[Union[str, Path]] = None,
     overwrite: bool = True,
     no_plots: bool = True,
+    extra_args: Optional[list] = None,
     # ---- remote-only ----
     hints: Optional[dict] = None,
     api_key_file: Optional[Union[str, Path]] = None,
@@ -1363,6 +1372,7 @@ def solve_plate(
             no_plots=no_plots,
             verbose=verbose,
             cache=cache,
+            extra_args=extra_args,
         )
     elif backend == "remote":
         return solve_plate_remote(
