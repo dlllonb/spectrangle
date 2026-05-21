@@ -23,4 +23,6 @@ from .wcsangle import (
     local_east_angle_deg,
     center_wcs_angle_metrics,
     WcsAngleMetrics,
+    pixel_angle_to_sky_angle,
+    local_wcs_jacobian,
 )

@@ -233,3 +233,111 @@ def center_wcs_angle_metrics(
         north_angle_deg=north,
         east_angle_deg=east,
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-trace pixel-to-sky direction conversion
+# ---------------------------------------------------------------------------
+
+def pixel_angle_to_sky_angle(
+    wcs: WCS,
+    x: float,
+    y: float,
+    theta_pix_deg: float,
+    step_px: float = 10.0,
+) -> float:
+    """Map a pixel-space direction angle to a sky tangent-plane position angle.
+
+    Converts a locally-measured pixel-space trace direction at ``(x, y)``
+    into the corresponding east-of-north position angle on the sky, using
+    the local WCS Jacobian (finite-difference).  This is the per-trace
+    conversion used by the SpectrAngle pipeline.
+
+    Parameters
+    ----------
+    wcs : astropy.wcs.WCS
+        Plate-solved WCS (SIP/distortion-aware via ``pixel_to_world``).
+    x, y : float
+        Pixel position (0-based) of the trace centroid.
+    theta_pix_deg : float
+        Pixel-space direction, degrees CCW from the +x pixel axis.
+    step_px : float
+        Finite-difference step size in pixels.  Default 10 px.
+
+    Returns
+    -------
+    float
+        Sky position angle in degrees east of north, range (−180°, 180°].
+
+    Notes
+    -----
+    Algorithm:
+    1. Start at pixel ``(x, y)``; project to sky coordinate ``c0``.
+    2. Step ``step_px`` pixels along ``theta_pix_deg`` to ``(x2, y2)``; project to ``c1``.
+    3. Project ``c1`` into a ``SkyOffsetFrame`` centred at ``c0``.
+    4. Return ``arctan2(lon_offset, lat_offset)``, which is east-of-north PA.
+
+    RA wrapping and cos(dec) scaling are handled by the SkyOffsetFrame.
+    """
+    theta_rad = np.radians(theta_pix_deg)
+    x2 = float(x) + step_px * np.cos(theta_rad)
+    y2 = float(y) + step_px * np.sin(theta_rad)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        c0 = wcs.pixel_to_world(float(x), float(y))
+        c1 = wcs.pixel_to_world(x2, y2)
+
+    frame = c0.skyoffset_frame()
+    c1_off = c1.transform_to(frame)
+
+    # lon = east offset, lat = north offset in SkyOffsetFrame
+    lon_deg = float(c1_off.lon.wrap_at(180 * u.deg).deg)
+    lat_deg = float(c1_off.lat.deg)
+
+    return float(np.degrees(np.arctan2(lon_deg, lat_deg)))
+
+
+def local_wcs_jacobian(
+    wcs: WCS,
+    x: float,
+    y: float,
+    step_px: float = 1.0,
+) -> np.ndarray:
+    """2×2 local Jacobian of the sky tangent-plane w.r.t. pixel coordinates.
+
+    Returns the matrix::
+
+        [[d(RA·cos Dec)/dx,  d(RA·cos Dec)/dy],
+         [d Dec/dx,           d Dec/dy         ]]
+
+    in units of degrees per pixel, evaluated at pixel ``(x, y)``.
+
+    Parameters
+    ----------
+    wcs : astropy.wcs.WCS
+        Plate-solved WCS.
+    x, y : float
+        Pixel position (0-based).
+    step_px : float
+        Finite-difference step in pixels.  Default 1 px.
+
+    Returns
+    -------
+    ndarray, shape (2, 2)
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        c0 = wcs.pixel_to_world(float(x), float(y))
+        cx = wcs.pixel_to_world(float(x) + step_px, float(y))
+        cy = wcs.pixel_to_world(float(x), float(y) + step_px)
+
+    cos_dec = np.cos(np.radians(float(c0.dec.deg)))
+
+    dra_dx  = angle_diff_deg(float(cx.ra.deg),  float(c0.ra.deg)) * cos_dec / step_px
+    dra_dy  = angle_diff_deg(float(cy.ra.deg),  float(c0.ra.deg)) * cos_dec / step_px
+    ddec_dx = (float(cx.dec.deg) - float(c0.dec.deg)) / step_px
+    ddec_dy = (float(cy.dec.deg) - float(c0.dec.deg)) / step_px
+
+    return np.array([[dra_dx, dra_dy],
+                     [ddec_dx, ddec_dy]])
