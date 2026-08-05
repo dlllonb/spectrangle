@@ -59,6 +59,13 @@ outputs/
 out/
 working/
 
+# Dev/exploratory work — not real package code
+# (notebooks/scripts are the working record of how extractor/ was validated,
+# but are regenerated/experimental, not meant to be committed at this stage)
+notebooks/
+scripts/
+dev/
+
 # Secrets / keys
 *.txt
 !requirements*.txt

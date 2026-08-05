@@ -43,3 +43,6 @@ urllib3>=2.0
 
 # ── Jupyter kernel (register this venv with JupyterLab) ──────────────────────
 ipykernel>=6.29
+
+# ── tests ──────────────────────────────────────────────────────────────────────
+pytest>=8.0
