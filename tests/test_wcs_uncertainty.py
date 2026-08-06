@@ -2,7 +2,10 @@ import numpy as np
 from astropy.io import fits
 
 from extractor.platesolve import PlatesolveResult
-from extractor.wcs_uncertainty import bootstrap_wcs_orientation, stratified_bootstrap_indices
+from extractor.wcs_uncertainty import (
+    bootstrap_wcs_orientation, stratified_bootstrap_indices,
+    run_one_bootstrap_draw, robust_bootstrap_summary,
+)
 
 
 def _fake_wcs_header(ra0=10.0, dec0=56.0, north_angle_deg=90.0, scale_deg_per_px=9.9 / 3600.0):
@@ -206,3 +209,87 @@ def test_bootstrap_wcs_orientation_records_failures_without_crashing():
     assert result.n_boot_ok == 0
     assert len(result.failures) == 10
     assert np.isnan(result.sigma_north_deg)
+
+
+def test_run_one_bootstrap_draw_ok():
+    xs = np.linspace(0, 3000, 50)
+    ys = np.linspace(0, 2000, 50)
+    rng = np.random.default_rng(1)
+
+    def solve_fn(sub_x, sub_y):
+        return PlatesolveResult(header=_fake_wcs_header(north_angle_deg=90.0))
+
+    draw = run_one_bootstrap_draw(xs, ys, (2000, 3000), (3, 3), 0.9, rng, solve_fn)
+    assert draw["status"] == "ok"
+    assert draw["error"] is None
+    assert abs(draw["north_angle_deg"] - 90.0) < 0.01
+    assert draw["header"] is not None
+    assert draw["n_sources"] > 0
+
+
+def test_run_one_bootstrap_draw_no_solution():
+    xs = np.linspace(0, 3000, 50)
+    ys = np.linspace(0, 2000, 50)
+    rng = np.random.default_rng(1)
+
+    draw = run_one_bootstrap_draw(xs, ys, (2000, 3000), (3, 3), 0.9, rng, lambda sx, sy: None)
+    assert draw["status"] == "no_solution"
+    assert draw["north_angle_deg"] is None
+    assert draw["header"] is None
+
+
+def test_run_one_bootstrap_draw_exception():
+    xs = np.linspace(0, 3000, 50)
+    ys = np.linspace(0, 2000, 50)
+    rng = np.random.default_rng(1)
+
+    def bad_solve(sx, sy):
+        raise ValueError("boom")
+
+    draw = run_one_bootstrap_draw(xs, ys, (2000, 3000), (3, 3), 0.9, rng, bad_solve)
+    assert draw["status"] == "exception"
+    assert "boom" in draw["error"]
+    assert draw["north_angle_deg"] is None
+
+
+def test_robust_bootstrap_summary_recovers_tight_cluster_and_clips_outlier():
+    """Same shape as the real overnight use-case: many draws tightly
+    clustered around the anchor, one lone outlier that should be clipped
+    out of sigma/mad but still counted in n_clipped."""
+    rng = np.random.default_rng(7)
+    tight = 90.0 + rng.normal(0.0, 0.01, size=99)
+    angles = np.concatenate([tight, [95.0]])  # one 5 deg outlier among 100
+
+    summary = robust_bootstrap_summary(angles, anchor_deg=90.0)
+    assert abs(summary["center_deg"] - 90.0) < 0.01
+    assert summary["sigma_deg"] < 0.1
+    assert summary["n_clipped"] == 1
+    assert summary["keep_mask"][-1] == False  # noqa: E712 -- the outlier is the last element
+    assert summary["keep_mask"][:-1].all()
+
+
+def test_robust_bootstrap_summary_handles_wraparound():
+    """Angles near the +/-180 boundary must not be corrupted by naive
+    subtraction -- angle_diff_deg handles this, robust_bootstrap_summary
+    should inherit that correctness."""
+    rng = np.random.default_rng(8)
+    angles = 179.5 + rng.normal(0.0, 0.02, size=50)
+    angles = (angles + 180.0) % 360.0 - 180.0  # wrap some into the -180 branch
+
+    summary = robust_bootstrap_summary(angles, anchor_deg=179.5)
+    # center should be close to 179.5 (mod 360, in (-180, 180] representation)
+    from extractor.wcsangle import angle_diff_deg
+    assert abs(angle_diff_deg(summary["center_deg"], 179.5)) < 0.05
+    assert summary["sigma_deg"] < 0.1
+
+
+def test_robust_bootstrap_summary_empty_and_single():
+    empty = robust_bootstrap_summary(np.array([]), anchor_deg=90.0)
+    assert empty["center_deg"] == 90.0
+    assert np.isnan(empty["sigma_deg"])
+    assert empty["n_clipped"] == 0
+
+    single = robust_bootstrap_summary(np.array([90.2]), anchor_deg=90.0)
+    assert abs(single["center_deg"] - 90.2) < 1e-9
+    assert np.isnan(single["sigma_deg"])
+    assert single["n_clipped"] == 0

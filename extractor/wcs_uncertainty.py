@@ -178,6 +178,121 @@ def stratified_bootstrap_indices(
     return np.concatenate(idx_parts) if idx_parts else np.array([], dtype=int)
 
 
+def run_one_bootstrap_draw(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    image_shape: tuple[int, int],
+    n_grid: tuple[int, int],
+    frac: float,
+    rng: np.random.Generator,
+    solve_fn: Callable[[np.ndarray, np.ndarray], Optional[PlatesolveResult]],
+) -> dict:
+    """Run exactly one stratified-subset re-solve and extract its
+    north_angle_deg. The single-draw primitive shared by
+    `bootstrap_wcs_orientation` (which runs a modest fixed n_boot) and any
+    external accumulation script that wants far more draws than a single
+    call is practical for (e.g. a long-running overnight extended
+    bootstrap, checkpointing draws as they complete) -- both should use
+    this exact same draw logic rather than reimplementing it.
+
+    Returns
+    -------
+    dict with keys:
+        north_angle_deg : float or None (None unless status == "ok")
+        header : fits.Header or None (None unless status == "ok")
+        status : "ok" | "no_solution" | "exception"
+        error : str or None -- present only for status == "exception"
+        n_sources : int -- size of the drawn subset
+    """
+    idx = stratified_bootstrap_indices(xs, ys, image_shape, n_grid=n_grid, frac=frac, rng=rng)
+    try:
+        r = solve_fn(xs[idx], ys[idx])
+    except Exception as e:  # noqa: BLE001 -- caller decides how to handle/log
+        return dict(north_angle_deg=None, header=None, status="exception",
+                    error=str(e)[:200], n_sources=len(idx))
+    if r is None:
+        return dict(north_angle_deg=None, header=None, status="no_solution",
+                    error=None, n_sources=len(idx))
+    m = center_wcs_angle_metrics(_make_wcs(r.header), image_shape, compute_east=False)
+    return dict(north_angle_deg=float(m.north_angle_deg), header=r.header, status="ok",
+                error=None, n_sources=len(idx))
+
+
+def _robust_center_mad_threshold(deviations_deg: np.ndarray, outlier_z: float, outlier_floor_deg: float):
+    """Median, MAD, and outlier-clip threshold of an array of (wrap-safe)
+    angular deviations. Shared primitive behind both the fiducial-vs-
+    population outlier check and `robust_bootstrap_summary`'s per-draw
+    clipping."""
+    median = float(np.median(deviations_deg))
+    mad = float(np.median(np.abs(deviations_deg - median)))
+    threshold = max(outlier_z * 1.4826 * mad, outlier_floor_deg)
+    return median, mad, threshold
+
+
+def robust_bootstrap_summary(
+    angles_deg: np.ndarray,
+    anchor_deg: float,
+    outlier_z: float = 5.0,
+    outlier_floor_deg: float = 0.05,
+) -> dict:
+    """Robust median/MAD-based summary of a population of north_angle_deg
+    bootstrap draws around a reference anchor (wrap-safe via
+    `angle_diff_deg`), with sigma-clipping of individual outlier draws
+    before computing the final sigma/mad -- exactly the statistics
+    `bootstrap_wcs_orientation` already applies to its own (fixed-size)
+    bootstrap population, extracted here so a caller accumulating many
+    more draws externally (e.g. an overnight extended-bootstrap run) can
+    summarize them the same, already-validated way instead of
+    reimplementing the logic.
+
+    `anchor_deg` only needs to be numerically close to the true value (it
+    resolves 0/360 wraparound) -- it does not need to be exactly correct.
+    The returned `center_deg` is `anchor_deg` refined by the population's
+    own median offset, so with enough draws this can be a more precise
+    estimate than the anchor itself.
+
+    Parameters
+    ----------
+    angles_deg : array-like
+        Every successful bootstrap draw's north_angle_deg.
+    anchor_deg : float
+        Reference angle used to resolve wraparound (e.g. an
+        already-established trusted north_angle_deg).
+    outlier_z, outlier_floor_deg :
+        See `bootstrap_wcs_orientation`.
+
+    Returns
+    -------
+    dict with keys: center_deg, sigma_deg, mad_deg, keep_mask (ndarray of
+    bool, same length as angles_deg), n_clipped (int).
+    """
+    angles_arr = np.asarray(angles_deg, dtype=float)
+    if len(angles_arr) == 0:
+        return dict(center_deg=anchor_deg, sigma_deg=float("nan"), mad_deg=float("nan"),
+                    keep_mask=np.ones(0, dtype=bool), n_clipped=0)
+
+    d = angle_diff_deg(angles_arr, anchor_deg)
+    if len(d) < 2:
+        center_deg = (anchor_deg + float(d[0]) + 180.0) % 360.0 - 180.0
+        return dict(center_deg=center_deg, sigma_deg=float("nan"), mad_deg=float("nan"),
+                    keep_mask=np.ones(len(d), dtype=bool), n_clipped=0)
+
+    median_d, mad_d, threshold = _robust_center_mad_threshold(d, outlier_z, outlier_floor_deg)
+    keep_mask = np.abs(d - median_d) <= threshold
+    kept = d[keep_mask]
+
+    if len(kept) >= 2:
+        sigma = float(np.std(kept))
+        mad_final = float(np.median(np.abs(kept - np.median(kept))))
+    else:
+        sigma = float(np.std(d))
+        mad_final = mad_d
+
+    center_deg = (anchor_deg + median_d + 180.0) % 360.0 - 180.0
+    return dict(center_deg=center_deg, sigma_deg=sigma, mad_deg=mad_final,
+                keep_mask=keep_mask, n_clipped=int(np.sum(~keep_mask)))
+
+
 def bootstrap_wcs_orientation(
     xs: np.ndarray,
     ys: np.ndarray,
@@ -270,18 +385,12 @@ def bootstrap_wcs_orientation(
     headers = []
     failures: list = []
     for _ in range(n_boot):
-        idx = stratified_bootstrap_indices(xs, ys, image_shape, n_grid=n_grid, frac=boot_frac, rng=rng)
-        try:
-            r = solve(xs[idx], ys[idx])
-        except Exception as e:  # noqa: BLE001 -- record and continue bootstrapping
-            failures.append(f"exception: {str(e)[:80]}")
+        draw = run_one_bootstrap_draw(xs, ys, image_shape, n_grid, boot_frac, rng, solve)
+        if draw["status"] != "ok":
+            failures.append(draw["status"] if draw["error"] is None else f'{draw["status"]}: {draw["error"]}')
             continue
-        if r is None:
-            failures.append("no_solution")
-            continue
-        m = center_wcs_angle_metrics(_make_wcs(r.header), image_shape, compute_east=False)
-        angles.append(m.north_angle_deg)
-        headers.append(r.header)
+        angles.append(draw["north_angle_deg"])
+        headers.append(draw["header"])
 
     angles_arr = np.array(angles, dtype=float)
 
@@ -290,20 +399,15 @@ def bootstrap_wcs_orientation(
         # fiducial purely as a numerically-convenient wrap-safe anchor --
         # NOT as an assumed-correct reference (see outlier check below).
         d_from_fid = angle_diff_deg(angles_arr, fid_angle)
-        median_d = float(np.median(d_from_fid))
-        mad_d = float(np.median(np.abs(d_from_fid - median_d)))
-        robust_sigma_d = 1.4826 * mad_d
-        threshold = max(outlier_z * robust_sigma_d, outlier_floor_deg)
+        median_d, _mad_d, threshold = _robust_center_mad_threshold(d_from_fid, outlier_z, outlier_floor_deg)
         fiducial_is_outlier = abs(median_d) > threshold
 
         if fiducial_is_outlier:
             north_angle = (fid_angle + median_d + 180.0) % 360.0 - 180.0
-            resid = d_from_fid - median_d  # deviation of each draw from north_angle
-            closest_i = int(np.argmin(np.abs(resid)))
+            closest_i = int(np.argmin(np.abs(angle_diff_deg(angles_arr, north_angle))))
             header = headers[closest_i]
         else:
             north_angle = fid_angle
-            resid = d_from_fid  # deviation of each draw from north_angle (== fid_angle here)
             header = fid_result.header
 
         # A single bootstrap draw can independently hit the same
@@ -313,20 +417,11 @@ def bootstrap_wcs_orientation(
         # before reporting sigma/mad so one bad re-solve can't inflate
         # sigma_WCS by 100x -- MAD alone would stay quiet about this since
         # it's already robust, but sigma_north_deg (plain std, the number
-        # actually meant for sigma_wcs_deg) is not.
-        resid_center = float(np.median(resid))
-        resid_mad = float(np.median(np.abs(resid - resid_center)))
-        clip_thresh = max(outlier_z * 1.4826 * resid_mad, outlier_floor_deg)
-        keep_mask = np.abs(resid - resid_center) <= clip_thresh
-        n_clipped = int(np.sum(~keep_mask))
-        kept = resid[keep_mask]
-
-        if len(kept) >= 2:
-            sigma = float(np.std(kept))
-            mad = float(np.median(np.abs(kept - np.median(kept))))
-        else:
-            sigma = float(np.std(resid))
-            mad = resid_mad
+        # actually meant for sigma_wcs_deg) is not. Shared with any
+        # external accumulation script via `robust_bootstrap_summary`.
+        summary = robust_bootstrap_summary(angles_arr, north_angle, outlier_z, outlier_floor_deg)
+        sigma, mad = summary["sigma_deg"], summary["mad_deg"]
+        keep_mask, n_clipped = summary["keep_mask"], summary["n_clipped"]
     else:
         north_angle = fid_angle
         sigma = mad = float("nan")

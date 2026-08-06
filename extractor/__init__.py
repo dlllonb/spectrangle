@@ -45,4 +45,5 @@ from .combine import combine_traces, CombinedAngleResult
 from .pipeline import measure_grating_angle, AngleExtractionResult
 from .wcs_uncertainty import (
     bootstrap_wcs_orientation, stratified_bootstrap_indices, WcsBootstrapResult,
+    run_one_bootstrap_draw, robust_bootstrap_summary,
 )
