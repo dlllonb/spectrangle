@@ -104,21 +104,47 @@ class WcsBootstrapResult:
     north_angles_deg : ndarray
         Every successful bootstrap draw's north_angle_deg, UNFILTERED (for
         histogramming/diagnostics -- includes any draws excluded from
-        `sigma_north_deg`/`mad_north_deg` by the per-draw outlier clip;
-        see `bootstrap_kept_mask`).
+        `sigma_north_deg`/`mad_north_deg` by the per-draw outlier clip
+        AND any excluded by the SIP-achievement filter below; see
+        `bootstrap_kept_mask`).
     bootstrap_kept_mask : ndarray of bool
         Same length/order as `north_angles_deg`. False for any individual
         bootstrap draw that was itself a large outlier relative to the
         rest of the population (the same astrometry.net false-match
         failure mode that can hit the fiducial can independently hit a
-        bootstrap subset -- see module docstring) and was therefore
-        excluded from `sigma_north_deg`/`mad_north_deg` so one bad re-
-        solve can't inflate the reported scatter by orders of magnitude.
+        bootstrap subset -- see module docstring), OR (when
+        `sip_filter_applied` is True) that didn't achieve the requested
+        SIP order -- either way, excluded from `sigma_north_deg`/
+        `mad_north_deg` so one bad re-solve or a majority of low-
+        information solves can't dominate the reported scatter/center.
     n_boot_clipped : int
         `sum(~bootstrap_kept_mask)` -- how many otherwise-successful
-        draws were excluded as individual outliers. Non-zero is worth a
-        second look even if small, since it's evidence the platesolve
-        backend is not fully reliable for this source list.
+        draws were excluded, for EITHER reason above. When
+        `sip_filter_applied` is True this can be a large fraction (most
+        of the population, on a sparse image) rather than "a couple of
+        stray outliers" -- check `sip_filter_applied`/`n_boot_full_sip`
+        to tell the two situations apart before assuming backend
+        unreliability from a large `n_boot_clipped` alone.
+    sip_filter_applied : bool
+        True if `sigma_north_deg`/`north_angle_deg` were computed from
+        ONLY the draws that achieved the requested `tweak_order` SIP fit
+        (see `prefer_full_sip`/`min_full_sip_draws` on
+        `bootstrap_wcs_orientation`). Found empirically (real on-sky test
+        image, `notebooks/19_wcs_sip_achievement.ipynb`) that draws which
+        fail to reach the requested SIP order on a stratified subset are
+        measurably, systematically biased relative to an independently-
+        trusted full-source-list solve -- by more than the existing
+        outlier clip catches, because that clip's threshold scales with
+        the population's own (on a sparse image, much larger) scatter.
+        **This heuristic was validated on exactly one sparse, wide-field
+        real-sky dataset -- it is not guaranteed to generalize.** Always
+        check this flag (and the UserWarning emitted alongside it) rather
+        than assuming the filter did or didn't fire.
+    n_boot_full_sip : int
+        How many of the `n_boot_ok` successful draws achieved the
+        requested SIP order, regardless of whether `sip_filter_applied`
+        ended up True (it requires at least `min_full_sip_draws` of
+        them).
     failures : list[str]
         Short reasons for any bootstrap draws that didn't produce a
         usable solve (solve failure, exception, etc.) -- if this is a
@@ -138,6 +164,8 @@ class WcsBootstrapResult:
     north_angles_deg: np.ndarray = field(default_factory=lambda: np.array([]))
     bootstrap_kept_mask: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))
     n_boot_clipped: int = 0
+    sip_filter_applied: bool = False
+    n_boot_full_sip: int = 0
     failures: list = field(default_factory=list)
 
 
@@ -293,6 +321,119 @@ def robust_bootstrap_summary(
                 keep_mask=keep_mask, n_clipped=int(np.sum(~keep_mask)))
 
 
+def sip_order_achieved(header: fits.Header, requested_order: int) -> bool:
+    """True if *header*'s fitted SIP polynomial reached (at least)
+    *requested_order*.
+
+    Empirically binary in practice, not a spectrum of partial orders:
+    solve-field either has enough correspondence points to fit the full
+    requested `tweak_order` and returns exactly that, or it doesn't and
+    returns no SIP terms at all (see
+    `notebooks/18_wcs_bootstrap_refinement.ipynb` Section 1 -- checked
+    directly across thousands of bootstrap draws on two images, no
+    intermediate order was ever observed). Uses ``>=`` rather than ``==``
+    so this stays correct if a future solve-field version ever does
+    return a partial/lower order instead of nothing.
+    """
+    a_order = header.get("A_ORDER")
+    b_order = header.get("B_ORDER")
+    achieved = max(a_order or 0, b_order or 0) if (a_order or b_order) else 0
+    return achieved >= requested_order
+
+
+def sip_filter_indices(
+    headers: list,
+    requested_tweak_order: int,
+    prefer_full_sip: bool = True,
+    min_full_sip_draws: int = 20,
+) -> tuple[np.ndarray, bool, int]:
+    """Decide which bootstrap draws to use for sigma_WCS/center statistics,
+    optionally restricting to only the draws that achieved the requested
+    SIP `tweak_order`.
+
+    Why this exists: on a sparse, wide-field real-sky test image, most
+    stratified bootstrap draws (73%) never achieve the requested
+    `tweak_order=5` SIP fit at all -- too few correspondence points in a
+    90%-subsampled draw to constrain the polynomial, so solve-field
+    silently falls back to a plain linear fit instead. Those no-SIP
+    draws turned out to be measurably, systematically biased relative to
+    an independently-trusted full-source-list solve (0.065 deg offset,
+    outside even the SIP-achieving subset's own 0.042 deg scatter,
+    Mann-Whitney p~1e-186) -- a bias too small for
+    `robust_bootstrap_summary`'s own outlier clip to catch, because that
+    clip's threshold scales with the population's OWN scatter, which on
+    a sparse image is large enough to swallow this bias whole. See
+    `notebooks/19_wcs_sip_achievement.ipynb` for the full validation
+    (both images, cross-checked against position as well as angle).
+
+    **This heuristic -- "achieving the requested SIP order marks a more
+    trustworthy solve" -- was validated on exactly two images, one
+    sparse/wide-field real-sky image and one dense simulated image. It
+    is NOT guaranteed to generalize to other data.** A narrower-field or
+    denser future image might solve just as well at a lower or zero
+    order everywhere, in which case this filter should simply never
+    engage (the `min_full_sip_draws` fallback below handles that safely)
+    -- but it should never engage or not-engage silently, which is why
+    this function always emits a `UserWarning` stating which branch it
+    took.
+
+    Parameters
+    ----------
+    headers : list of fits.Header (or plain dict with the same keys)
+        One per successful bootstrap draw, same order as the angles they
+        go with.
+    requested_tweak_order : int
+        The SIP `tweak_order` that was actually requested from
+        solve-field for these draws.
+    prefer_full_sip : bool
+        If False, the filter is disabled entirely (always returns every
+        index, no warning) -- for callers who've already decided this
+        heuristic isn't appropriate for their data.
+    min_full_sip_draws : int
+        Minimum number of SIP-achieving draws required before trusting
+        that subset on its own; below this, falls back to the full
+        population (current/original behavior) since a tiny subset would
+        itself be a noisy, unreliable estimate.
+
+    Returns
+    -------
+    (indices, sip_filter_applied, n_full_sip)
+        indices : ndarray of int
+            Index into `headers` to actually use for statistics -- either
+            just the SIP-achieving subset, or every index.
+        sip_filter_applied : bool
+        n_full_sip : int
+            How many of `headers` achieved the requested order, regardless
+            of whether the filter ultimately engaged.
+    """
+    n_total = len(headers)
+    sip_mask = (np.array([sip_order_achieved(h, requested_tweak_order) for h in headers], dtype=bool)
+                if n_total else np.zeros(0, dtype=bool))
+    n_full_sip = int(sip_mask.sum())
+
+    if not prefer_full_sip:
+        return np.arange(n_total), False, n_full_sip
+
+    if n_full_sip >= min_full_sip_draws:
+        warnings.warn(
+            f"WCS bootstrap: {n_full_sip}/{n_total} draws achieved the requested "
+            f"tweak_order={requested_tweak_order} SIP fit -- restricting sigma_WCS/center to that "
+            f"subset (validated on a sparse wide-field image, see "
+            f"notebooks/19_wcs_sip_achievement.ipynb; may not generalize to other data -- pass "
+            f"prefer_full_sip=False to disable this).",
+            UserWarning, stacklevel=3,
+        )
+        return np.where(sip_mask)[0], True, n_full_sip
+
+    warnings.warn(
+        f"WCS bootstrap: only {n_full_sip}/{n_total} draws achieved the requested "
+        f"tweak_order={requested_tweak_order} SIP fit (below min_full_sip_draws={min_full_sip_draws}) -- "
+        f"not enough to trust a SIP-only subset; falling back to the full bootstrap population.",
+        UserWarning, stacklevel=3,
+    )
+    return np.arange(n_total), False, n_full_sip
+
+
 def bootstrap_wcs_orientation(
     xs: np.ndarray,
     ys: np.ndarray,
@@ -311,6 +452,8 @@ def bootstrap_wcs_orientation(
     seed: int = 42,
     outlier_z: float = 5.0,
     outlier_floor_deg: float = 0.05,
+    prefer_full_sip: bool = True,
+    min_full_sip_draws: int = 20,
     solve_fn: Optional[Callable[[np.ndarray, np.ndarray], Optional[PlatesolveResult]]] = None,
 ) -> WcsBootstrapResult:
     """Empirical WCS-orientation uncertainty via spatially-stratified
@@ -345,6 +488,16 @@ def bootstrap_wcs_orientation(
         MAD (a suspiciously tight cluster, itself worth noting) doesn't
         flag a negligible fiducial offset purely from floating-point
         noise.
+    prefer_full_sip, min_full_sip_draws :
+        See `sip_filter_indices` -- when enough bootstrap draws achieve
+        the requested `tweak_order` SIP fit, sigma_WCS/center are
+        restricted to that subset (validated on a sparse wide-field
+        image to correct a real, statistically significant bias in the
+        non-SIP-achieving majority; see
+        `notebooks/19_wcs_sip_achievement.ipynb`). A `UserWarning` is
+        always emitted stating whether this fired. Set
+        `prefer_full_sip=False` to disable and always use every
+        successful draw (the original/pre-refinement behavior).
     solve_fn : callable, optional
         Override the actual solving call -- `solve_fn(sub_xs, sub_ys) ->
         PlatesolveResult or None`. Used for testing the sampling/
@@ -392,7 +545,19 @@ def bootstrap_wcs_orientation(
         angles.append(draw["north_angle_deg"])
         headers.append(draw["header"])
 
-    angles_arr = np.array(angles, dtype=float)
+    angles_arr_all = np.array(angles, dtype=float)
+    headers_all = headers
+
+    stat_idx, sip_filter_applied, n_boot_full_sip = sip_filter_indices(
+        headers_all, tweak_order, prefer_full_sip=prefer_full_sip, min_full_sip_draws=min_full_sip_draws,
+    ) if len(headers_all) else (np.arange(0), False, 0)
+
+    # Everything below operates on the (possibly SIP-filtered) working
+    # population -- including the fiducial-vs-population outlier check,
+    # so the fiducial gets compared against the more-trustworthy subset
+    # too when the filter engages, not just the final sigma/center.
+    angles_arr = angles_arr_all[stat_idx]
+    headers = [headers_all[i] for i in stat_idx]
 
     if len(angles_arr) >= 2:
         # deviations of every bootstrap draw from the fiducial, using the
@@ -421,22 +586,31 @@ def bootstrap_wcs_orientation(
         # external accumulation script via `robust_bootstrap_summary`.
         summary = robust_bootstrap_summary(angles_arr, north_angle, outlier_z, outlier_floor_deg)
         sigma, mad = summary["sigma_deg"], summary["mad_deg"]
-        keep_mask, n_clipped = summary["keep_mask"], summary["n_clipped"]
+        keep_mask = summary["keep_mask"]
     else:
         north_angle = fid_angle
         sigma = mad = float("nan")
         fiducial_is_outlier = False
         header = fid_result.header
         keep_mask = np.ones(len(angles_arr), dtype=bool)
-        n_clipped = 0
 
     fiducial_offset = angle_diff_deg(fid_angle, north_angle)
+
+    # Reindex keep_mask (computed over the possibly SIP-filtered subset)
+    # back onto the FULL set of successful draws, so north_angles_deg /
+    # bootstrap_kept_mask still cover every draw for diagnostics -- a
+    # draw excluded by the SIP filter is just as "not kept" as one
+    # excluded by the outlier clip, both show up as False here.
+    full_keep_mask = np.zeros(len(angles_arr_all), dtype=bool)
+    full_keep_mask[stat_idx] = keep_mask
+    n_boot_clipped = int(np.sum(~full_keep_mask))
 
     return WcsBootstrapResult(
         north_angle_deg=north_angle, sigma_north_deg=sigma, mad_north_deg=mad, header=header,
         fiducial_north_deg=fid_angle, fiducial_header=fid_result.header,
         fiducial_is_outlier=fiducial_is_outlier, fiducial_offset_deg=float(fiducial_offset),
-        n_boot_requested=n_boot, n_boot_ok=len(angles_arr),
-        north_angles_deg=angles_arr, bootstrap_kept_mask=keep_mask, n_boot_clipped=n_clipped,
+        n_boot_requested=n_boot, n_boot_ok=len(angles_arr_all),
+        north_angles_deg=angles_arr_all, bootstrap_kept_mask=full_keep_mask, n_boot_clipped=n_boot_clipped,
+        sip_filter_applied=sip_filter_applied, n_boot_full_sip=n_boot_full_sip,
         failures=failures,
     )

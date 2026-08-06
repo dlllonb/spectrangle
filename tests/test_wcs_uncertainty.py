@@ -1,14 +1,17 @@
 import numpy as np
+import pytest
 from astropy.io import fits
 
 from extractor.platesolve import PlatesolveResult
 from extractor.wcs_uncertainty import (
     bootstrap_wcs_orientation, stratified_bootstrap_indices,
     run_one_bootstrap_draw, robust_bootstrap_summary,
+    sip_order_achieved, sip_filter_indices,
 )
 
 
-def _fake_wcs_header(ra0=10.0, dec0=56.0, north_angle_deg=90.0, scale_deg_per_px=9.9 / 3600.0):
+def _fake_wcs_header(ra0=10.0, dec0=56.0, north_angle_deg=90.0, scale_deg_per_px=9.9 / 3600.0,
+                      sip_order=None):
     """A minimal TAN-projection FITS header at a given (fixed) pixel-space
     north-angle orientation, for testing WITHOUT solve-field. north_angle_deg
     is engineered via CD-matrix rotation: 90 deg -> a pure +y=north,
@@ -21,13 +24,18 @@ def _fake_wcs_header(ra0=10.0, dec0=56.0, north_angle_deg=90.0, scale_deg_per_px
     requested angle about 90 deg. Round-trip-tested for all deviations from
     90 deg; earlier versions of this helper only tested angles within
     fractions of a degree of 90, where std-only assertions can't distinguish
-    the two signs (a mirrored jitter distribution has the same scatter)."""
+    the two signs (a mirrored jitter distribution has the same scatter).
+
+    sip_order : if given, adds a trivial (all-zero, i.e. no actual distortion)
+    SIP polynomial of that order, purely so `A_ORDER`/`B_ORDER` are present --
+    used to test the SIP-achievement filter without needing a real distorted
+    fit."""
     theta = np.radians(-(north_angle_deg - 90.0))  # rotation of the CD matrix
     cd = scale_deg_per_px * np.array([[-np.cos(theta), np.sin(theta)],
                                        [np.sin(theta), np.cos(theta)]])
     h = fits.Header()
-    h["CTYPE1"] = "RA---TAN"
-    h["CTYPE2"] = "DEC--TAN"
+    h["CTYPE1"] = "RA---TAN-SIP" if sip_order is not None else "RA---TAN"
+    h["CTYPE2"] = "DEC--TAN-SIP" if sip_order is not None else "DEC--TAN"
     h["CRVAL1"] = ra0
     h["CRVAL2"] = dec0
     h["CRPIX1"] = 1500.0
@@ -36,6 +44,11 @@ def _fake_wcs_header(ra0=10.0, dec0=56.0, north_angle_deg=90.0, scale_deg_per_px
     h["CD1_2"] = cd[0, 1]
     h["CD2_1"] = cd[1, 0]
     h["CD2_2"] = cd[1, 1]
+    if sip_order is not None:
+        h["A_ORDER"] = sip_order
+        h["B_ORDER"] = sip_order
+        h["A_0_0"] = 0.0
+        h["B_0_0"] = 0.0
     return h
 
 
@@ -293,3 +306,98 @@ def test_robust_bootstrap_summary_empty_and_single():
     assert abs(single["center_deg"] - 90.2) < 1e-9
     assert np.isnan(single["sigma_deg"])
     assert single["n_clipped"] == 0
+
+
+# ---------------------------------------------------------------------------
+# SIP-order-achievement filter (notebooks 18/19: real image's non-SIP-
+# achieving majority was measurably biased relative to an independently
+# trusted solve, by more than the existing outlier clip catches)
+# ---------------------------------------------------------------------------
+
+def test_sip_order_achieved():
+    assert sip_order_achieved(_fake_wcs_header(sip_order=5), requested_order=5) is True
+    assert sip_order_achieved(_fake_wcs_header(sip_order=3), requested_order=5) is False
+    assert sip_order_achieved(_fake_wcs_header(sip_order=5), requested_order=3) is True  # >=, not ==
+    assert sip_order_achieved(_fake_wcs_header(sip_order=None), requested_order=5) is False
+    # plain dict (as loaded from JSONL) works the same as a fits.Header
+    assert sip_order_achieved({"A_ORDER": 5, "B_ORDER": 5}, requested_order=5) is True
+    assert sip_order_achieved({}, requested_order=5) is False
+
+
+def test_sip_filter_indices_engages_with_enough_sip_draws():
+    headers = [_fake_wcs_header(sip_order=5)] * 25 + [_fake_wcs_header(sip_order=None)] * 75
+    with pytest.warns(UserWarning, match="restricting sigma_WCS/center"):
+        idx, applied, n_full_sip = sip_filter_indices(headers, requested_tweak_order=5, min_full_sip_draws=20)
+    assert applied is True
+    assert n_full_sip == 25
+    assert len(idx) == 25
+    assert set(idx) == set(range(25))  # the SIP-achieving headers happen to be first 25
+
+
+def test_sip_filter_indices_falls_back_below_min_full_sip_draws():
+    headers = [_fake_wcs_header(sip_order=5)] * 5 + [_fake_wcs_header(sip_order=None)] * 95
+    with pytest.warns(UserWarning, match="not enough to trust a SIP-only subset"):
+        idx, applied, n_full_sip = sip_filter_indices(headers, requested_tweak_order=5, min_full_sip_draws=20)
+    assert applied is False
+    assert n_full_sip == 5
+    assert len(idx) == 100  # falls back to every draw
+
+
+def test_sip_filter_indices_disabled_emits_no_warning():
+    headers = [_fake_wcs_header(sip_order=None)] * 10
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning here fails the test
+        idx, applied, n_full_sip = sip_filter_indices(headers, requested_tweak_order=5, prefer_full_sip=False)
+    assert applied is False
+    assert n_full_sip == 0
+    assert len(idx) == 10
+
+
+def test_bootstrap_wcs_orientation_prefers_sip_achieving_draws_when_biased():
+    """Mirrors the real-image finding directly: a majority of draws that
+    never achieve the requested SIP order are systematically biased away
+    from a minority that does. With the filter engaged (default), the
+    reported center should track the SIP-achieving (correct) subset, not
+    get pulled toward the biased majority."""
+    rng = np.random.default_rng(9)
+    xs = rng.uniform(0, 3000, size=200)
+    ys = rng.uniform(0, 2000, size=200)
+    image_shape = (2000, 3000)
+
+    TRUE_ANGLE = 90.0
+    BIAS_DEG = 0.3  # small enough that the existing outlier clip would NOT catch it
+    tight_jitter = rng.normal(0.0, 0.01, size=200)
+
+    call_count = {"n": 0}
+
+    def fake_solve(sub_x, sub_y):
+        i = call_count["n"]
+        call_count["n"] += 1
+        if i == 0:
+            # fiducial: full list, achieves SIP, correct
+            return PlatesolveResult(header=_fake_wcs_header(north_angle_deg=TRUE_ANGLE, sip_order=5))
+        j = (i - 1) % len(tight_jitter)
+        if j < 30:  # minority: achieves SIP, clusters on the true answer
+            header = _fake_wcs_header(north_angle_deg=TRUE_ANGLE + tight_jitter[j], sip_order=5)
+        else:  # majority: no SIP, systematically biased but not outlier-large
+            header = _fake_wcs_header(north_angle_deg=TRUE_ANGLE + BIAS_DEG + tight_jitter[j], sip_order=None)
+        return PlatesolveResult(header=header)
+
+    kwargs = dict(n_boot=100, boot_frac=0.9, n_grid=(3, 3), seed=10, solve_fn=fake_solve, tweak_order=5)
+
+    with pytest.warns(UserWarning, match="restricting sigma_WCS/center"):
+        filtered = bootstrap_wcs_orientation(xs, ys, image_shape, min_full_sip_draws=20, **kwargs)
+
+    call_count["n"] = 0  # reset for the second, unfiltered run
+    unfiltered = bootstrap_wcs_orientation(xs, ys, image_shape, prefer_full_sip=False, **kwargs)
+
+    assert filtered.sip_filter_applied is True
+    assert filtered.n_boot_full_sip == 30
+    # filtered result should sit close to the true/SIP-cluster angle...
+    assert abs(filtered.north_angle_deg - TRUE_ANGLE) < 0.05
+    # ...and clearly closer to truth than the unfiltered (majority-biased) result
+    assert abs(filtered.north_angle_deg - TRUE_ANGLE) < abs(unfiltered.north_angle_deg - TRUE_ANGLE)
+    # diagnostics still cover every draw, not just the filtered subset
+    assert len(filtered.north_angles_deg) == 100
+    assert filtered.bootstrap_kept_mask.sum() <= 30
