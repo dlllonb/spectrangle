@@ -85,12 +85,41 @@ def extract_stars(
 
 
 def make_xylist(xs: np.ndarray, ys: np.ndarray) -> io.BytesIO:
-    """Pack source positions into an in-memory FITS xylist for nova.astrometry.net.
+    """Pack source positions into an in-memory FITS xylist for nova.astrometry.net
+    / local solve-field.
 
     Uses float64 (FITS 'D' format) to preserve centroid precision.
+
+    Pixel convention: *xs*, *ys* are 0-based (pixel index 0 = first pixel,
+    the convention used everywhere else in this package -- matches
+    `extract_stars`, numpy array indexing, and `photutils.DAOStarFinder`'s
+    output). astrometry.net's xylist format follows the FITS standard
+    instead, where the center of the first pixel is (1, 1) -- see
+    https://astrometry.net/doc/readme.html ("recall that FITS specifies
+    that the center of the first pixel is pixel coordinate (1,1)"). +1.0 is
+    added here, at the single point where positions leave this package's
+    0-based convention, so every caller (remote and local solve alike)
+    gets a correctly-registered WCS without needing to remember this
+    conversion themselves.
+
+    Before this conversion was added, every solve-field/nova.astrometry.net
+    WCS produced by this package was silently shifted by exactly 1 pixel
+    in both x and y relative to the true source positions -- found via a
+    ~14" (~sqrt(2) pixels at the sim image's ~9.9"/px scale) constant
+    position-error offset between the WCS-solved image-center sky position
+    and the simulated image's known true pointing (RA0DEG/DEC0DEG),
+    confirmed via a second, independent check (the implied pixel offset
+    backed out through the local WCS Jacobian was (-0.97, -1.04) px, i.e.
+    (-1, -1) to within solve noise). A CONSTANT translation of every
+    correspondence point does not change the fitted rotation/scale (the
+    linear part of a least-squares fit is translation-invariant; only the
+    fitted CRPIX/CRVAL absorb a uniform shift) -- confirmed empirically,
+    not just assumed, in `tests/test_stars.py` and the notebook/session
+    that found this bug -- so this fix corrects absolute WCS position
+    without changing any previously-reported trace/sky angle result.
     """
-    col_x = fits.Column(name="X", format="D", array=xs.astype(np.float64))
-    col_y = fits.Column(name="Y", format="D", array=ys.astype(np.float64))
+    col_x = fits.Column(name="X", format="D", array=(xs.astype(np.float64) + 1.0))
+    col_y = fits.Column(name="Y", format="D", array=(ys.astype(np.float64) + 1.0))
     hdul = fits.HDUList([fits.PrimaryHDU(), fits.BinTableHDU.from_columns([col_x, col_y])])
     buf = io.BytesIO()
     hdul.writeto(buf)
