@@ -31,6 +31,7 @@ from .detection import detect_traces
 from .fitting import measure_trace, remove_contamination, trace_correlation_length_px
 from .combine import combine_traces, CombinedAngleResult
 from .wcsangle import pixel_angle_to_sky_angle
+from .masking import build_catalog_star_mask, recover_empirical_psf_sigma
 
 
 @dataclass
@@ -88,6 +89,12 @@ def measure_grating_angle(
     bump_k: float = 2.5,
     n_boot: int = 3000,
     seed: int = 42,
+    star_catalog_ra_deg: Optional[np.ndarray] = None,
+    star_catalog_dec_deg: Optional[np.ndarray] = None,
+    star_catalog_mag: Optional[np.ndarray] = None,
+    mask_k: float = 8.0,
+    mask_radius_px: Optional[float] = None,
+    mask_mag_cut: float = 13.0,
 ) -> AngleExtractionResult:
     """Measure the grating/diffraction-trace orientation angle in an
     image, optionally converted to a sky-frame position angle.
@@ -99,7 +106,9 @@ def measure_grating_angle(
     wcs : astropy.wcs.WCS, optional
         Plate-solved WCS. If supplied, theta_sky_deg is computed via
         `wcsangle.pixel_angle_to_sky_angle` at the image center. If not
-        supplied, only the pixel-space result is returned.
+        supplied, only the pixel-space result is returned. Also
+        required (alongside the star_catalog_* arrays) to enable
+        catalog star masking -- see below.
     sigma_wcs_deg : float, optional
         WCS-orientation uncertainty. NOT computed by this package -- the
         WCS-orientation bootstrap approach used earlier in this project
@@ -117,6 +126,37 @@ def measure_grating_angle(
         Passed to `fitting.remove_contamination`.
     n_boot, seed :
         Passed to `combine.combine_traces`'s bootstrap uncertainty.
+    star_catalog_ra_deg, star_catalog_dec_deg, star_catalog_mag : ndarray, optional
+        Parallel arrays describing a star catalog for this field. If
+        ALL THREE are supplied alongside `wcs`, catalog point-source
+        masking (`masking.build_catalog_star_mask`) is applied before
+        `detect_traces` runs -- this is the validated fix (this
+        session's `new_results.txt` Entries 71-75) for two confirmed
+        contamination mechanisms: chance star-chain false candidates,
+        and two real traces bridged by a third star's point-source
+        core. Collapses per-trace calibration from badly overconfident
+        (std(z)~6-8) to honest-to-conservative (~0.3-1.5), validated
+        across 18 simulated fields and real multi-realization Monte
+        Carlo testing. **Known limitation, not yet fixed**: a residual,
+        field-specific mean bias (~0.05-0.20 deg) remains in a
+        majority of tested fields even with masking applied (Entries
+        76-82) -- see `masking.py`'s module docstring. If any of the
+        three arrays is None, masking is skipped entirely (backward-
+        compatible default).
+    mask_k : float
+        Mask disk radius as a multiple of this image's own empirically
+        -recovered PSF sigma (`masking.recover_empirical_psf_sigma`).
+        Default 8.0 is the single fixed value validated across all 18
+        test fields (Entry 75) -- do not increase without re-reading
+        Entry 79 first (roughly 2x this already causes a distinct,
+        catastrophic over-masking failure, not just a milder version
+        of under-masking).
+    mask_radius_px : float, optional
+        Overrides `mask_k` with an explicit pixel radius, skipping the
+        empirical PSF recovery step.
+    mask_mag_cut : float
+        Only catalog stars at or brighter than this magnitude are
+        masked. Default 13.0 matches the validated setting.
 
     Returns
     -------
@@ -126,9 +166,21 @@ def measure_grating_angle(
                   n_sigma=n_sigma, bg_sigma=bg_sigma, smooth_sigma=smooth_sigma,
                   bump_k=bump_k, n_boot=n_boot, seed=seed)
 
+    exclude_mask = None
+    catalog_supplied = (star_catalog_ra_deg is not None and star_catalog_dec_deg is not None
+                         and star_catalog_mag is not None)
+    if catalog_supplied and wcs is not None:
+        radius_px = mask_radius_px if mask_radius_px is not None else mask_k * recover_empirical_psf_sigma(image)
+        exclude_mask = build_catalog_star_mask(
+            image.shape, wcs, star_catalog_ra_deg, star_catalog_dec_deg, star_catalog_mag,
+            radius_px=radius_px, mag_cut=mask_mag_cut,
+        )
+        config.update(mask_radius_px=radius_px, mask_mag_cut=mask_mag_cut)
+
     candidates, n_raw, threshold = detect_traces(
         image, bg_sigma=bg_sigma, smooth_sigma=smooth_sigma, n_sigma=n_sigma,
         min_length_px=min_length_px, min_eccentricity=min_eccentricity,
+        exclude_mask=exclude_mask,
     )
 
     eff_res_px = trace_correlation_length_px(image.shape, smooth_sigma=smooth_sigma)
