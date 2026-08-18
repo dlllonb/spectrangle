@@ -8,13 +8,19 @@ __description__ = "Diffraction/spectral trace orientation angle extraction from 
 #   platesolve.platesolve()  → broad astrometry.net field solution, save products to working/
 #
 # Phase 2 (planned): custom distortion model built from Phase 1 products
-# Phase 3 (extractor/detection.py, fitting.py, combine.py, pipeline.py):
+# Phase 3 (extractor/detection.py, fitting.py, combine.py, pipeline.py,
+#          masking.py, fragments.py):
 #   detection.detect_traces()      → candidate elongated trace segments
+#   masking.build_catalog_star_mask() → optional catalog-star exclude_mask
+#                                        (fixes crowded-field false candidates)
+#   fragments.merge_mask_bridged_fragments() → optional reunification of
+#                                        traces split by that masking
 #   fitting.measure_trace() /
 #     fitting.remove_contamination() → per-trace PCA fit + star-contamination removal
 #   combine.combine_traces()       → robust ensemble pixel-space angle + uncertainty
-#   pipeline.measure_grating_angle() → end-to-end entry point, with optional
-#                                        sky-frame conversion via wcsangle.py
+#   pipeline.measure_grating_angle() → end-to-end entry point, wires the above
+#                                        together, with optional sky-frame
+#                                        conversion via wcsangle.py
 #
 # sigma_WCS (the other half of the sky-frame error budget) is not yet
 # reusable code in this package -- see pipeline.measure_grating_angle's

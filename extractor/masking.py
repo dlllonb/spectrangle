@@ -95,6 +95,42 @@ def recover_empirical_psf_sigma(image: np.ndarray, n_stars: int = 15, half: int 
     return float(np.median(sigmas))
 
 
+def catalog_star_pixel_positions(
+    image_shape: tuple[int, int],
+    wcs: WCS,
+    catalog_ra_deg: np.ndarray,
+    catalog_dec_deg: np.ndarray,
+    catalog_mag: np.ndarray,
+    radius_px: float,
+    mag_cut: float = 13.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project the same sufficiently-bright, in-bounds catalog stars
+    `build_catalog_star_mask` would mask into pixel coordinates,
+    without rasterizing a mask array.
+
+    Shared selection logic factored out here so `build_catalog_star_mask`
+    and `fragments.merge_mask_bridged_fragments` always agree on exactly
+    which stars are "masked" — used by the latter to know which star
+    caused a given trace split (Entry 90).
+
+    Returns
+    -------
+    x_px, y_px : ndarray
+        Pixel positions of every masked star, already restricted to
+        stars within `radius_px` + 2px of the image bounds.
+    """
+    bright = catalog_mag <= mag_cut
+    ra, dec = np.asarray(catalog_ra_deg)[bright], np.asarray(catalog_dec_deg)[bright]
+    if len(ra) == 0:
+        return np.zeros(0), np.zeros(0)
+
+    ny, nx = image_shape
+    x_px, y_px = wcs.all_world2pix(ra, dec, 0)
+    margin = radius_px + 2
+    in_bounds = (x_px >= -margin) & (x_px < nx + margin) & (y_px >= -margin) & (y_px < ny + margin)
+    return x_px[in_bounds], y_px[in_bounds]
+
+
 def build_catalog_star_mask(
     image_shape: tuple[int, int],
     wcs: WCS,
@@ -140,16 +176,11 @@ def build_catalog_star_mask(
     ndarray[bool], shape image_shape
     """
     ny, nx = image_shape
-    bright = catalog_mag <= mag_cut
-    ra, dec = np.asarray(catalog_ra_deg)[bright], np.asarray(catalog_dec_deg)[bright]
-    if len(ra) == 0:
+    x_px, y_px = catalog_star_pixel_positions(
+        image_shape, wcs, catalog_ra_deg, catalog_dec_deg, catalog_mag, radius_px, mag_cut,
+    )
+    if len(x_px) == 0:
         return np.zeros(image_shape, dtype=bool)
-
-    x_px, y_px = wcs.all_world2pix(ra, dec, 0)
-
-    margin = radius_px + 2
-    in_bounds = (x_px >= -margin) & (x_px < nx + margin) & (y_px >= -margin) & (y_px < ny + margin)
-    x_px, y_px = x_px[in_bounds], y_px[in_bounds]
 
     mask = np.zeros(image_shape, dtype=bool)
     r_int = int(math.ceil(radius_px))

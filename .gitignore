@@ -65,6 +65,7 @@ working/
 notebooks/
 scripts/
 dev/
+scratch/
 
 # Secrets / keys
 *.txt

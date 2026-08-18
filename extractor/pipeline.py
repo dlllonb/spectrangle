@@ -1,10 +1,12 @@
 """
 pipeline.py — End-to-end grating-angle extraction.
 
-Phase 3 entry point: detect_traces -> measure_trace (initial) ->
-combine_traces (initial reference) -> remove_contamination (per trace,
-against that reference) -> combine_traces (final) -> optional sky-frame
-conversion via wcsangle.pixel_angle_to_sky_angle if a WCS is supplied.
+Phase 3 entry point: detect_traces -> [optional: catalog star masking,
+masking.py] -> [optional: mask-bridged fragment reunification,
+fragments.py] -> measure_trace (initial) -> combine_traces (initial
+reference) -> remove_contamination (per trace, against that reference)
+-> combine_traces (final) -> optional sky-frame conversion via
+wcsangle.pixel_angle_to_sky_angle if a WCS is supplied.
 
 The two-pass combine is intentional (project notebooks 09-13):
 contamination removal needs an external reference angle that ISN'T the
@@ -31,7 +33,8 @@ from .detection import detect_traces
 from .fitting import measure_trace, remove_contamination, trace_correlation_length_px
 from .combine import combine_traces, CombinedAngleResult
 from .wcsangle import pixel_angle_to_sky_angle
-from .masking import build_catalog_star_mask, recover_empirical_psf_sigma
+from .masking import build_catalog_star_mask, recover_empirical_psf_sigma, catalog_star_pixel_positions
+from .fragments import merge_mask_bridged_fragments
 
 
 @dataclass
@@ -95,6 +98,7 @@ def measure_grating_angle(
     mask_k: float = 8.0,
     mask_radius_px: Optional[float] = None,
     mask_mag_cut: float = 13.0,
+    merge_fragments: bool = True,
 ) -> AngleExtractionResult:
     """Measure the grating/diffraction-trace orientation angle in an
     image, optionally converted to a sky-frame position angle.
@@ -157,6 +161,18 @@ def measure_grating_angle(
     mask_mag_cut : float
         Only catalog stars at or brighter than this magnitude are
         masked. Default 13.0 matches the validated setting.
+    merge_fragments : bool
+        Only has an effect when catalog masking is active (see above).
+        If True (default), reunify pairs of detected candidates that
+        are fragments of one real trace split by a masked star's disk
+        (`fragments.merge_mask_bridged_fragments`) before measurement —
+        the validated fix for Entry 87's fragmentation problem: masking
+        frequently splits a real trace into two pieces, shortening the
+        longest/highest-weight traces up to 3.5x. Validated on the full
+        18-field Monte Carlo set (Entry 90): pooled |err| drops 10.5%,
+        pooled bootstrap uncertainty drops 4.4%, no catastrophic
+        per-field failures. Set False to reproduce pre-Entry-90 behavior
+        exactly (e.g. for regression comparison).
 
     Returns
     -------
@@ -167,6 +183,7 @@ def measure_grating_angle(
                   bump_k=bump_k, n_boot=n_boot, seed=seed)
 
     exclude_mask = None
+    mask_star_x, mask_star_y, mask_radius_used = None, None, None
     catalog_supplied = (star_catalog_ra_deg is not None and star_catalog_dec_deg is not None
                          and star_catalog_mag is not None)
     if catalog_supplied and wcs is not None:
@@ -176,12 +193,21 @@ def measure_grating_angle(
             radius_px=radius_px, mag_cut=mask_mag_cut,
         )
         config.update(mask_radius_px=radius_px, mask_mag_cut=mask_mag_cut)
+        if merge_fragments:
+            mask_star_x, mask_star_y = catalog_star_pixel_positions(
+                image.shape, wcs, star_catalog_ra_deg, star_catalog_dec_deg, star_catalog_mag,
+                radius_px=radius_px, mag_cut=mask_mag_cut,
+            )
+            mask_radius_used = radius_px
 
     candidates, n_raw, threshold = detect_traces(
         image, bg_sigma=bg_sigma, smooth_sigma=smooth_sigma, n_sigma=n_sigma,
         min_length_px=min_length_px, min_eccentricity=min_eccentricity,
         exclude_mask=exclude_mask,
     )
+    n_detected = len(candidates)
+    if merge_fragments and mask_star_x is not None:
+        candidates = merge_mask_bridged_fragments(candidates, mask_star_x, mask_star_y, mask_radius_used)
 
     eff_res_px = trace_correlation_length_px(image.shape, smooth_sigma=smooth_sigma)
 
@@ -219,7 +245,7 @@ def measure_grating_angle(
         theta_pix_deg=final_combined.theta_pix_deg,
         theta_pix_uncertainty_deg=final_combined.theta_pix_uncertainty_deg,
         theta_sky_deg=theta_sky_deg, theta_sky_uncertainty_deg=theta_sky_uncertainty_deg,
-        n_traces_detected=len(candidates), n_traces_used=final_combined.n_used,
+        n_traces_detected=n_detected, n_traces_used=final_combined.n_used,
         quality=final_combined.quality,
         combined=final_combined, initial_combined=initial_combined, config=config,
     )
