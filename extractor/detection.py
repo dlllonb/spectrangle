@@ -49,6 +49,19 @@ class TraceCandidate:
     total_flux : float
     x_center, y_center : float
         Intensity-weighted centroid.
+    original_length_px : float, optional
+        Set only by `extension.extend_candidates` -- the candidate's
+        `length_px` BEFORE the trace-extension walker ran, i.e. the
+        length actually validated by ordinary connected-component
+        detection. None for a candidate that was never extended.
+        `fitting.measure_trace`/`remove_contamination` use this (when
+        present) as the basis for ensemble WEIGHT instead of the
+        (potentially extension-inflated) `length_px` -- see
+        `extension.py`'s module docstring for why: extension genuinely
+        improves the ANGLE estimate but its length gain isn't reliable
+        enough to also inflate this trace's influence over the field
+        combine, validated at full 18-field x 3-seed scale (this
+        session's `new_results.txt` Entries 101-115).
     """
     rows: np.ndarray
     cols: np.ndarray
@@ -59,6 +72,7 @@ class TraceCandidate:
     total_flux: float
     x_center: float
     y_center: float
+    original_length_px: Optional[float] = None
 
 
 def downsample_factor(image_shape: tuple[int, int], max_side: int = 1500) -> int:
@@ -67,6 +81,51 @@ def downsample_factor(image_shape: tuple[int, int], max_side: int = 1500) -> int
     pixel-to-pixel correlation length for whatever image size was
     actually processed (see `fitting.trace_correlation_length_px`)."""
     return max(1, max(image_shape) // max_side)
+
+
+def compute_background_residual(
+    image: np.ndarray,
+    bg_sigma: float = 50.0,
+    smooth_sigma: float = 2.5,
+    n_sigma: float = 6.0,
+    exclude_mask: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, float, float, float]:
+    """Background-subtracted, gap-bridged residual and its sigma-clipped
+    detection threshold -- the exact preprocessing `detect_traces` uses
+    internally, factored out so `extension.py` can walk the SAME
+    full-resolution residual (and use the SAME median/std/threshold) a
+    trace was originally detected against, rather than recomputing a
+    subtly different one.
+
+    Returns
+    -------
+    resid : ndarray
+        Full-resolution (not internally downsampled) background-
+        subtracted, smoothed residual.
+    median, std : float
+        Sigma-clipped background statistics (computed on the internally
+        downsampled residual, matching `detect_traces`).
+    threshold : float
+        `median + n_sigma * std`.
+    """
+    img = image.astype(np.float32)
+    if exclude_mask is not None:
+        img = img.copy()
+        img[exclude_mask] = np.nan
+        bg = gaussian_filter(np.nan_to_num(img, nan=np.nanmedian(img)), sigma=bg_sigma)
+    else:
+        bg = gaussian_filter(img, sigma=bg_sigma)
+    resid = np.clip(image.astype(np.float32) - bg, 0.0, None)
+    if exclude_mask is not None:
+        resid[exclude_mask] = 0.0
+    if smooth_sigma > 0:
+        resid = gaussian_filter(resid, sigma=smooth_sigma)
+
+    factor = downsample_factor(resid.shape)
+    small = resid[::factor, ::factor] if factor > 1 else resid
+    _, median, std = sigma_clipped_stats(small, sigma=3.0, maxiters=5)
+    threshold = median + n_sigma * std
+    return resid, float(median), float(std), float(threshold)
 
 
 def detect_traces(
@@ -120,23 +179,11 @@ def detect_traces(
     threshold : float
         The sigma-clipped detection threshold actually used.
     """
-    img = image.astype(np.float32)
-    if exclude_mask is not None:
-        img = img.copy()
-        img[exclude_mask] = np.nan
-        bg = gaussian_filter(np.nan_to_num(img, nan=np.nanmedian(img)), sigma=bg_sigma)
-    else:
-        bg = gaussian_filter(img, sigma=bg_sigma)
-    resid = np.clip(image.astype(np.float32) - bg, 0.0, None)
-    if exclude_mask is not None:
-        resid[exclude_mask] = 0.0
-    if smooth_sigma > 0:
-        resid = gaussian_filter(resid, sigma=smooth_sigma)
-
+    resid, median, std, threshold = compute_background_residual(
+        image, bg_sigma=bg_sigma, smooth_sigma=smooth_sigma, n_sigma=n_sigma, exclude_mask=exclude_mask,
+    )
     factor = downsample_factor(resid.shape)
     small = resid[::factor, ::factor] if factor > 1 else resid
-    _, median, std = sigma_clipped_stats(small, sigma=3.0, maxiters=5)
-    threshold = median + n_sigma * std
     labeled = label(small >= threshold)
 
     candidates: list[TraceCandidate] = []

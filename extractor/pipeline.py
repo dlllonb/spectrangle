@@ -35,6 +35,7 @@ from .combine import combine_traces, CombinedAngleResult
 from .wcsangle import pixel_angle_to_sky_angle
 from .masking import build_catalog_star_mask, recover_empirical_psf_sigma, catalog_star_pixel_positions
 from .fragments import merge_mask_bridged_fragments
+from .extension import extend_candidates
 
 
 @dataclass
@@ -99,6 +100,10 @@ def measure_grating_angle(
     mask_radius_px: Optional[float] = None,
     mask_mag_cut: float = 13.0,
     merge_fragments: bool = True,
+    extend_traces: bool = True,
+    ext_sigma: float = 4.0,
+    ext_cut_factor: float = 1.5,
+    ext_margin_steps: float = 2.0,
 ) -> AngleExtractionResult:
     """Measure the grating/diffraction-trace orientation angle in an
     image, optionally converted to a sky-frame position angle.
@@ -173,6 +178,30 @@ def measure_grating_angle(
         pooled bootstrap uncertainty drops 4.4%, no catastrophic
         per-field failures. Set False to reproduce pre-Entry-90 behavior
         exactly (e.g. for regression comparison).
+    extend_traces : bool
+        Only has an effect when catalog masking is active (see above --
+        same scoping as `merge_fragments`; never validated without
+        masking). If True (default), grow each detected candidate
+        outward along its own fitted axis to recover faint,
+        below-detection-threshold trace material (`extension.py`) --
+        the fix for `detect_traces` truncating real traces early.
+        Ensemble weight is based on the PRE-extension length, not the
+        extended one (see `detection.TraceCandidate.original_length_px`)
+        -- validated at full 18-field x 3-seed scale (this session's
+        `new_results.txt` Entries 97-115): 16/18 fields beat-or-tie
+        no-extension, pooled |err| drops 39% (0.051 -> 0.039 deg). Two
+        more aggressive per-trace gating strategies were tried and both
+        made results WORSE than this simpler length-based fix alone --
+        see `extension.py`'s module docstring before attempting a
+        per-trace accept/reject gate again. Set False to reproduce
+        pre-extension behavior exactly.
+    ext_sigma, ext_cut_factor, ext_margin_steps : float
+        Passed to `extension.extend_candidates` -- see that module's
+        docstring for what each controls and why the defaults (4.0,
+        1.5, 2.0) are image-measured-quantity-derived rather than
+        arbitrary. Not re-tuned without a proper multi-seed-averaged
+        validation (a single-seed sweep was tried and produced an
+        illusory "45% better" combo that failed on held-out seeds).
 
     Returns
     -------
@@ -193,12 +222,12 @@ def measure_grating_angle(
             radius_px=radius_px, mag_cut=mask_mag_cut,
         )
         config.update(mask_radius_px=radius_px, mask_mag_cut=mask_mag_cut)
+        mask_radius_used = radius_px
         if merge_fragments:
             mask_star_x, mask_star_y = catalog_star_pixel_positions(
                 image.shape, wcs, star_catalog_ra_deg, star_catalog_dec_deg, star_catalog_mag,
                 radius_px=radius_px, mag_cut=mask_mag_cut,
             )
-            mask_radius_used = radius_px
 
     candidates, n_raw, threshold = detect_traces(
         image, bg_sigma=bg_sigma, smooth_sigma=smooth_sigma, n_sigma=n_sigma,
@@ -208,6 +237,12 @@ def measure_grating_angle(
     n_detected = len(candidates)
     if merge_fragments and mask_star_x is not None:
         candidates = merge_mask_bridged_fragments(candidates, mask_star_x, mask_star_y, mask_radius_used)
+    if extend_traces and mask_radius_used is not None:
+        candidates = extend_candidates(
+            candidates, image, exclude_mask, mask_radius_used,
+            bg_sigma=bg_sigma, smooth_sigma=smooth_sigma, n_sigma=n_sigma,
+            ext_sigma=ext_sigma, cut_factor=ext_cut_factor, margin_steps=ext_margin_steps,
+        )
 
     eff_res_px = trace_correlation_length_px(image.shape, smooth_sigma=smooth_sigma)
 

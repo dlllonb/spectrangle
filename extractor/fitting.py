@@ -88,16 +88,27 @@ class TraceMeasurement:
     eccentricity : float
     total_flux : float
     weight : float
-        `(length_px / perp_std_px) ** 2` -- an inverse-variance-like
-        proxy for this trace's precision, validated (project notebook
-        10) as a better ensemble weight than raw flux: it lets a long,
-        thin, well-constrained trace dominate the combined result without
-        discarding the rest, consistent with what the analytical
-        uncertainty formula itself implies (weight ~ 1/sigma_theta^2).
+        `(weight_length_px / perp_std_px) ** 2` -- an inverse-variance-
+        like proxy for this trace's precision, validated (project
+        notebook 10) as a better ensemble weight than raw flux: it lets
+        a long, thin, well-constrained trace dominate the combined
+        result without discarding the rest, consistent with what the
+        analytical uncertainty formula itself implies (weight ~
+        1/sigma_theta^2). `weight_length_px` is `original_length_px`
+        when set (extended traces), else `length_px` -- see
+        `original_length_px` below and `extension.py`'s module
+        docstring.
     n_pixels_removed : int
         Pixels stripped as contamination by `remove_contamination` (0 if
         it hasn't run, or nothing was removed).
     quality_flags : list[str]
+    original_length_px : float, optional
+        Carried through from `detection.TraceCandidate.original_length_px`
+        when this measurement came from an extended candidate -- the
+        pre-extension length, used as the WEIGHT basis instead of
+        `length_px` (see `weight` above). None for a trace that was
+        never extended, in which case weight uses `length_px` exactly
+        as before (fully backward compatible).
     """
     x_center: float
     y_center: float
@@ -111,6 +122,7 @@ class TraceMeasurement:
     weight: float
     n_pixels_removed: int = 0
     quality_flags: list[str] = field(default_factory=list)
+    original_length_px: Optional[float] = None
 
     # kept for remove_contamination / diagnostics -- the pixels this
     # measurement was actually fit from (post-removal if applicable)
@@ -180,17 +192,27 @@ def analytical_sigma_theta_deg(length_px, perp_std_px, n_eff) -> np.ndarray:
 
 def measure_trace(candidate: TraceCandidate, effective_resolution_px: float) -> TraceMeasurement:
     """Plain PCA fit of one candidate, with analytical uncertainty --
-    no contamination removal yet (see `remove_contamination`)."""
+    no contamination removal yet (see `remove_contamination`).
+
+    Ensemble `weight` is based on `candidate.original_length_px` when
+    set (an extended candidate -- see `extension.py`), else on
+    `length_px` exactly as before. `n_eff`/`theta_pix_uncertainty_deg`
+    still use the trace's actual (possibly extended) `length_px` --
+    only the WEIGHT basis differs, since extension genuinely improves
+    the angle/precision estimate but its length gain isn't reliable
+    enough to also inflate this trace's ensemble influence."""
     angle, minor_std, major_std = pca_fit(candidate.rows, candidate.cols, candidate.weights)
     n_eff = candidate.length_px / max(effective_resolution_px, 1e-9)
     sigma = float(analytical_sigma_theta_deg(candidate.length_px, minor_std, n_eff))
-    weight = (candidate.length_px / max(minor_std, 1e-6)) ** 2
+    weight_length_px = candidate.original_length_px if candidate.original_length_px is not None else candidate.length_px
+    weight = (weight_length_px / max(minor_std, 1e-6)) ** 2
     return TraceMeasurement(
         x_center=candidate.x_center, y_center=candidate.y_center,
         theta_pix_deg=angle, theta_pix_uncertainty_deg=sigma,
         length_px=candidate.length_px, perp_std_px=minor_std, n_eff=n_eff,
         eccentricity=candidate.eccentricity, total_flux=candidate.total_flux,
         weight=weight, n_pixels_removed=0, quality_flags=[],
+        original_length_px=candidate.original_length_px,
         _rows=candidate.rows, _cols=candidate.cols, _weights=candidate.weights,
     )
 
@@ -290,7 +312,8 @@ def remove_contamination(
 
     n_eff = length_px / max(effective_resolution_px, 1e-9)
     sigma = float(analytical_sigma_theta_deg(length_px, minor_std, n_eff))
-    weight = (length_px / max(minor_std, 1e-6)) ** 2
+    weight_length_px = measurement.original_length_px if measurement.original_length_px is not None else length_px
+    weight = (weight_length_px / max(minor_std, 1e-6)) ** 2
 
     return TraceMeasurement(
         x_center=float(cols[keep].mean()), y_center=float(rows[keep].mean()),
@@ -298,5 +321,6 @@ def remove_contamination(
         length_px=length_px, perp_std_px=minor_std, n_eff=n_eff,
         eccentricity=measurement.eccentricity, total_flux=float(weights[keep].sum()),
         weight=weight, n_pixels_removed=n_removed, quality_flags=flags,
+        original_length_px=measurement.original_length_px,
         _rows=rows[keep], _cols=cols[keep], _weights=weights[keep],
     )
