@@ -161,10 +161,14 @@ def build_catalog_star_mask(
         image's own `recover_empirical_psf_sigma` as a single fixed
         choice across all 18 test fields (roughly 4-45x range in local
         star density) — pass `k * recover_empirical_psf_sigma(image)`
-        unless you have a specific reason to deviate. Entry 72/79:
-        avoid radii much larger than this (roughly 2x already causes a
-        distinct, catastrophic over-masking failure mode) — this is
-        NOT "bigger is safer."
+        unless you have a specific reason to deviate. Entry 72/79/117:
+        avoid radii much larger than this — the distinct, catastrophic
+        over-masking/tiling failure mode was first characterized at
+        k=12/16 (Entry 79) but a later full-sweep (Entry 117) found it
+        ALREADY onsets catastrophically at k=10 on 2 of 18 fields (one
+        to 14 deg error) — the real safe ceiling is tighter than "2x",
+        somewhere between 8 and 10. This is NOT "bigger is safer," and
+        the margin above 8 is smaller than earlier documentation implied.
     mag_cut : float
         Only stars at or brighter than this magnitude are masked
         (default matches Entry 71-75's validated 13.0 — faint enough

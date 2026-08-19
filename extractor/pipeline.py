@@ -159,9 +159,16 @@ def measure_grating_angle(
         -recovered PSF sigma (`masking.recover_empirical_psf_sigma`).
         Default 8.0 is the single fixed value validated across all 18
         test fields (Entry 75) -- do not increase without re-reading
-        Entry 79 first (roughly 2x this already causes a distinct,
-        catastrophic over-masking failure, not just a milder version
-        of under-masking).
+        Entry 79 and Entry 117 first: the over-masking/tiling failure
+        (Entry 79) was originally characterized at k=12/16, but a full
+        18-field x 2-seed sweep (Entry 117) found it ALREADY onsets
+        catastrophically at k=10 on 2 of 18 fields (fieldC to 14 deg
+        error, fieldB to 2 deg) -- the safe ceiling is tighter than
+        previously documented, somewhere between 8 and 10, not "roughly
+        2x". A {4,5,6,7,8} sweep (Entry 117) found no pooled improvement
+        over 8.0 worth switching to (k=7 ties it within noise; k=5/6 are
+        non-monotonically worse, likely a real but unexplained effect,
+        not just 2-seed noise -- not yet investigated).
     mask_radius_px : float, optional
         Overrides `mask_k` with an explicit pixel radius, skipping the
         empirical PSF recovery step.
