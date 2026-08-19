@@ -104,6 +104,8 @@ def measure_grating_angle(
     ext_sigma: float = 4.0,
     ext_cut_factor: float = 1.5,
     ext_margin_steps: float = 2.0,
+    sigma_clip: bool = True,
+    sigma_clip_k: float = 2.0,
 ) -> AngleExtractionResult:
     """Measure the grating/diffraction-trace orientation angle in an
     image, optionally converted to a sky-frame position angle.
@@ -202,6 +204,33 @@ def measure_grating_angle(
         arbitrary. Not re-tuned without a proper multi-seed-averaged
         validation (a single-seed sweep was tried and produced an
         illusory "45% better" combo that failed on held-out seeds).
+    sigma_clip : bool
+        Only has an effect when catalog masking is active (same scoping
+        as `merge_fragments`/`extend_traces` -- validated only on top of
+        the masked+fragment-merged+extended pipeline; applying it to the
+        bare/unmasked path clips far too aggressively, since there's no
+        upstream cleanup removing the contamination/fragmentation that
+        the masked pipeline already handles -- confirmed directly:
+        unconditional clipping collapsed `n_traces_used` from 24 to 5 on
+        the unmasked real-image regression test). If True (default) and
+        masking is active, the FINAL combine (after `remove_contamination`)
+        iteratively drops traces whose axial deviation from the current
+        weighted circular mean exceeds `sigma_clip_k` sigma, recombining
+        each round -- see `combine.combine_traces`'s docstring for the
+        algorithm and validation. Applied only to the final combine, never
+        the initial one (which only feeds `remove_contamination`'s
+        reference angle and was never validated with clipping). Re-
+        validated against this exact shipped baseline at full 18-field x
+        3-seed scale (`new_results.txt` Entry 113): 33% pooled mean|err|
+        reduction, 52% tighter bootstrap uncertainty, 14/18 fields beat-
+        or-tie. Two fields (fieldB, fieldC) regress mildly -- root-caused
+        (Entry 114) to clipping removing part of a real, fortuitous
+        error-canceling trace cluster, not a clipping malfunction; both
+        stay within their own quoted uncertainty even regressed. Set
+        False to reproduce pre-clip behavior exactly.
+    sigma_clip_k : float
+        Clip threshold in units of the current weighted circular std.
+        Default 2.0 is the validated best of {2.0, 2.5, 3.0} (Entry 113).
 
     Returns
     -------
@@ -209,7 +238,8 @@ def measure_grating_angle(
     """
     config = dict(min_length_px=min_length_px, min_eccentricity=min_eccentricity,
                   n_sigma=n_sigma, bg_sigma=bg_sigma, smooth_sigma=smooth_sigma,
-                  bump_k=bump_k, n_boot=n_boot, seed=seed)
+                  bump_k=bump_k, n_boot=n_boot, seed=seed,
+                  sigma_clip=sigma_clip, sigma_clip_k=sigma_clip_k)
 
     exclude_mask = None
     mask_star_x, mask_star_y, mask_radius_used = None, None, None
@@ -262,7 +292,16 @@ def measure_grating_angle(
         remove_contamination(m, initial_combined.theta_pix_deg, eff_res_px, bump_k=bump_k)
         for m in initial_measurements
     ]
-    final_combined = combine_traces(final_measurements, n_boot=n_boot, seed=seed)
+    # scoped like merge_fragments/extend_traces: only validated (Entry 113)
+    # on top of the masked+fragment-merged+extended pipeline -- applying it
+    # to the bare/unmasked path clips far too aggressively (regressed
+    # tests/test_pipeline_real.py, tests/test_pipeline_sim.py, both
+    # unmasked, when tried unconditionally).
+    apply_sigma_clip = sigma_clip and mask_radius_used is not None
+    final_combined = combine_traces(
+        final_measurements, n_boot=n_boot, seed=seed,
+        sigma_clip=apply_sigma_clip, sigma_clip_k=sigma_clip_k,
+    )
 
     theta_sky_deg = None
     theta_sky_uncertainty_deg = None
