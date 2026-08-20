@@ -189,3 +189,29 @@ def test_measure_trace_weight_uses_original_length_when_set():
     assert m_extended.original_length_px == 50.0
     expected_ratio = (50.0 / 200.0) ** 2
     assert abs(m_extended.weight / m_plain.weight - expected_ratio) < 1e-6
+
+
+def test_extend_candidates_with_precomputed_background_matches_computing_it_fresh():
+    # same equivalence guarantee as detect_traces's own version of this test
+    # (Entry 122 finding 8) -- a caller sharing one compute_background_residual
+    # call between detect_traces and extend_candidates must get identical
+    # extension results either way
+    angle = -10.0
+    cx, cy = 175.0, 125.0
+    full_image = _synthetic_line_image(shape=(250, 350), angle_deg=angle, length=200.0,
+                                        cx=cx, cy=cy, width_sigma=2.0, amplitude=600.0)
+    truncated_image = _mask_beyond(full_image, angle, cx, cy, s_cut=-25.0)
+    candidates, _, _ = detect_traces(truncated_image, min_length_px=50.0, min_eccentricity=0.8,
+                                      bg_sigma=40.0, smooth_sigma=1.0)
+    candidate = candidates[0]
+
+    extended_fresh = extend_candidates([candidate], full_image, None, mask_radius_px=10.0,
+                                        bg_sigma=40.0, smooth_sigma=1.0)[0]
+
+    background = compute_background_residual(full_image, bg_sigma=40.0, smooth_sigma=1.0)
+    extended_shared = extend_candidates([candidate], full_image, None, mask_radius_px=10.0,
+                                         bg_sigma=40.0, smooth_sigma=1.0, background=background)[0]
+
+    assert extended_shared.length_px == extended_fresh.length_px
+    assert np.array_equal(extended_shared.rows, extended_fresh.rows)
+    assert np.array_equal(extended_shared.cols, extended_fresh.cols)

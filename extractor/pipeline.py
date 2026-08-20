@@ -30,7 +30,7 @@ from typing import Optional
 import numpy as np
 from astropy.wcs import WCS
 
-from .detection import detect_traces
+from .detection import detect_traces, compute_background_residual
 from .fitting import measure_trace, remove_contamination, trace_correlation_length_px
 from .combine import combine_traces, CombinedAngleResult
 from .wcsangle import pixel_angle_to_sky_angle
@@ -294,10 +294,17 @@ def measure_grating_angle(
                 radius_px=radius_px, mag_cut=mask_mag_cut,
             )
 
+    # computed once and shared with extend_candidates below (same bg_sigma/
+    # smooth_sigma/n_sigma/exclude_mask either way) -- avoids paying for the
+    # same O(image-size) Gaussian-filtered residual twice when masking+
+    # extension are both active, the shipped default (Entry 122 finding 8)
+    background = compute_background_residual(
+        image, bg_sigma=bg_sigma, smooth_sigma=smooth_sigma, n_sigma=n_sigma, exclude_mask=exclude_mask,
+    )
     candidates, n_raw, threshold = detect_traces(
         image, bg_sigma=bg_sigma, smooth_sigma=smooth_sigma, n_sigma=n_sigma,
         min_length_px=min_length_px, min_eccentricity=min_eccentricity,
-        exclude_mask=exclude_mask,
+        exclude_mask=exclude_mask, background=background,
     )
     n_detected = len(candidates)
     apply_merge_fragments = merge_fragments and masking_active
@@ -319,6 +326,7 @@ def measure_grating_angle(
             candidates, image, exclude_mask, mask_radius_used,
             bg_sigma=bg_sigma, smooth_sigma=smooth_sigma, n_sigma=n_sigma,
             ext_sigma=ext_sigma, cut_factor=ext_cut_factor, margin_steps=ext_margin_steps,
+            background=background,
         )
 
     eff_res_px = trace_correlation_length_px(image.shape, smooth_sigma=smooth_sigma)

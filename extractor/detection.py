@@ -136,6 +136,7 @@ def detect_traces(
     min_length_px: float = 25.0,
     min_eccentricity: float = 0.85,
     exclude_mask: Optional[np.ndarray] = None,
+    background: Optional[tuple] = None,
 ) -> tuple[list[TraceCandidate], int, float]:
     """Detect candidate trace segments in a single image.
 
@@ -169,6 +170,15 @@ def detect_traces(
     exclude_mask : ndarray, optional
         Boolean array, same shape as `image`, marking pixels to zero out
         before detection (e.g. known bad pixels). None disables masking.
+    background : tuple, optional
+        Pre-computed `(resid, median, std, threshold)` from
+        `compute_background_residual`, e.g. from a caller that also
+        needs it for `extension.extend_candidates` and wants to avoid
+        computing the same O(image-size) Gaussian-filtered residual
+        twice (Entry 122 finding 8) -- must have been computed with the
+        SAME bg_sigma/smooth_sigma/n_sigma/exclude_mask this call would
+        otherwise use itself, that's the caller's responsibility. None
+        (default) computes it fresh here, exactly as before.
 
     Returns
     -------
@@ -179,9 +189,12 @@ def detect_traces(
     threshold : float
         The sigma-clipped detection threshold actually used.
     """
-    resid, median, std, threshold = compute_background_residual(
-        image, bg_sigma=bg_sigma, smooth_sigma=smooth_sigma, n_sigma=n_sigma, exclude_mask=exclude_mask,
-    )
+    if background is not None:
+        resid, median, std, threshold = background
+    else:
+        resid, median, std, threshold = compute_background_residual(
+            image, bg_sigma=bg_sigma, smooth_sigma=smooth_sigma, n_sigma=n_sigma, exclude_mask=exclude_mask,
+        )
     factor = downsample_factor(resid.shape)
     small = resid[::factor, ::factor] if factor > 1 else resid
     labeled = label(small >= threshold)

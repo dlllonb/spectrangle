@@ -275,14 +275,25 @@ def extend_candidates(
     margin_steps: float = 2.0,
     refit_every: int = 3,
     max_steps: int = 200,
+    background: Optional[tuple] = None,
 ) -> list[TraceCandidate]:
     """Extend every candidate, sharing ONE background-residual/threshold
     computation (`detection.compute_background_residual`, called with
     the exact same parameters `detect_traces` used) across all of them
-    for consistency and to avoid recomputing it per-candidate."""
-    resid, median, std, threshold = compute_background_residual(
-        image, bg_sigma=bg_sigma, smooth_sigma=smooth_sigma, n_sigma=n_sigma, exclude_mask=exclude_mask,
-    )
+    for consistency and to avoid recomputing it per-candidate.
+
+    `background`, if given, is a pre-computed `(resid, median, std,
+    threshold)` tuple -- lets a caller that already computed this same
+    residual for `detect_traces` (same bg_sigma/smooth_sigma/n_sigma/
+    exclude_mask) pass it straight through instead of paying for a
+    second O(image-size) Gaussian-filter pass (Entry 122 finding 8).
+    None (default) computes it fresh here, exactly as before."""
+    if background is not None:
+        resid, median, std, threshold = background
+    else:
+        resid, median, std, threshold = compute_background_residual(
+            image, bg_sigma=bg_sigma, smooth_sigma=smooth_sigma, n_sigma=n_sigma, exclude_mask=exclude_mask,
+        )
     return [
         extend_trace_candidate(
             c, resid, exclude_mask, median, std, threshold, image.shape,

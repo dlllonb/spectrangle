@@ -1,6 +1,6 @@
 import numpy as np
 
-from extractor.detection import detect_traces
+from extractor.detection import detect_traces, compute_background_residual
 
 
 def _synthetic_line_image(shape=(200, 300), angle_deg=30.0, length=150.0,
@@ -53,3 +53,23 @@ def test_detect_traces_finds_nothing_in_pure_noise():
         image, min_length_px=50.0, min_eccentricity=0.8, bg_sigma=40.0, smooth_sigma=1.0,
     )
     assert len(candidates) == 0
+
+
+def test_detect_traces_with_precomputed_background_matches_computing_it_fresh():
+    # a caller (pipeline.py) that already computed compute_background_residual
+    # for itself (e.g. to also share with extension.extend_candidates,
+    # Entry 122 finding 8) must get an IDENTICAL result passing it in via
+    # `background=` as detect_traces computing it internally
+    image = _synthetic_line_image(angle_deg=25.0, length=150.0)
+    kwargs = dict(min_length_px=50.0, min_eccentricity=0.8, bg_sigma=40.0, smooth_sigma=1.0)
+
+    candidates_fresh, n_raw_fresh, threshold_fresh = detect_traces(image, **kwargs)
+
+    background = compute_background_residual(image, bg_sigma=40.0, smooth_sigma=1.0)
+    candidates_shared, n_raw_shared, threshold_shared = detect_traces(image, background=background, **kwargs)
+
+    assert n_raw_shared == n_raw_fresh
+    assert threshold_shared == threshold_fresh
+    assert len(candidates_shared) == len(candidates_fresh) == 1
+    assert candidates_shared[0].length_px == candidates_fresh[0].length_px
+    assert np.array_equal(candidates_shared[0].rows, candidates_fresh[0].rows)
