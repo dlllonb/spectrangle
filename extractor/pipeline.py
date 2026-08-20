@@ -23,6 +23,7 @@ sky-frame uncertainty.
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -260,8 +261,27 @@ def measure_grating_angle(
     # extend_traces/sigma_clip are all gated off this same flag, not inferred
     # separately from whichever masking-derived variable happens to be non-None
     masking_active = catalog_supplied and wcs is not None
+    if masking_active and mask_radius_px is None:
+        # recover_empirical_psf_sigma raises if no candidate star converges
+        # to a Gaussian fit (a crowded/faint/saturated image) -- that's a
+        # reason to skip masking for THIS image, not to abort the whole
+        # measurement (the pre-masking pipeline would otherwise have
+        # succeeded here; see Entry 122 finding 3).
+        try:
+            radius_px = mask_k * recover_empirical_psf_sigma(image)
+        except ValueError as e:
+            warnings.warn(
+                f"measure_grating_angle: catalog masking requested but PSF sigma recovery "
+                f"failed ({e}) -- falling back to the unmasked pipeline for this image "
+                f"(merge_fragments/extend_traces/sigma_clip are all scoped to masking being "
+                f"active, so they are skipped too).",
+                UserWarning,
+            )
+            masking_active = False
+    elif masking_active:
+        radius_px = mask_radius_px
+
     if masking_active:
-        radius_px = mask_radius_px if mask_radius_px is not None else mask_k * recover_empirical_psf_sigma(image)
         exclude_mask = build_catalog_star_mask(
             image.shape, wcs, star_catalog_ra_deg, star_catalog_dec_deg, star_catalog_mag,
             radius_px=radius_px, mag_cut=mask_mag_cut,
@@ -282,7 +302,16 @@ def measure_grating_angle(
     n_detected = len(candidates)
     apply_merge_fragments = merge_fragments and masking_active
     apply_extend_traces = extend_traces and masking_active
-    config.update(merge_fragments=apply_merge_fragments, extend_traces=apply_extend_traces)
+    # scoped like merge_fragments/extend_traces: only validated (Entry 113)
+    # on top of the masked+fragment-merged+extended pipeline -- applying it
+    # to the bare/unmasked path clips far too aggressively (regressed
+    # tests/test_pipeline_real.py, tests/test_pipeline_sim.py, both
+    # unmasked, when tried unconditionally). Computed here (not later,
+    # right before the final combine) so config reports it correctly even
+    # on the zero-candidates early-return path below.
+    apply_sigma_clip = sigma_clip and masking_active
+    config.update(merge_fragments=apply_merge_fragments, extend_traces=apply_extend_traces,
+                   sigma_clip=apply_sigma_clip)
     if apply_merge_fragments:
         candidates = merge_mask_bridged_fragments(candidates, mask_star_x, mask_star_y, mask_radius_used)
     if apply_extend_traces:
@@ -310,13 +339,6 @@ def measure_grating_angle(
         remove_contamination(m, initial_combined.theta_pix_deg, eff_res_px, bump_k=bump_k)
         for m in initial_measurements
     ]
-    # scoped like merge_fragments/extend_traces: only validated (Entry 113)
-    # on top of the masked+fragment-merged+extended pipeline -- applying it
-    # to the bare/unmasked path clips far too aggressively (regressed
-    # tests/test_pipeline_real.py, tests/test_pipeline_sim.py, both
-    # unmasked, when tried unconditionally).
-    apply_sigma_clip = sigma_clip and masking_active
-    config['sigma_clip'] = apply_sigma_clip  # record what actually ran, not the raw request (see docstring)
     final_combined = combine_traces(
         final_measurements, n_boot=n_boot, seed=seed,
         sigma_clip=apply_sigma_clip, sigma_clip_k=sigma_clip_k,
