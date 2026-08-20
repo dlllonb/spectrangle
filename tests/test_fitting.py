@@ -1,10 +1,45 @@
 import numpy as np
+import pytest
 
 from extractor.detection import detect_traces
 from extractor.fitting import (
-    axial_diff, measure_trace, remove_contamination, trace_correlation_length_px,
+    axial_diff, axial_unit_vectors, measure_trace, project_onto_axis,
+    remove_contamination, trace_correlation_length_px,
 )
 from test_detection import _synthetic_line_image
+
+
+def test_axial_unit_vectors_matches_manual_trig():
+    for angle in (0.0, 30.0, 90.0, -45.0, 137.0):
+        ux, uy, px, py = axial_unit_vectors(angle)
+        th = np.radians(angle)
+        assert ux == pytest.approx(np.cos(th))
+        assert uy == pytest.approx(np.sin(th))
+        # perpendicular: rotate (ux,uy) by +90deg, and unit vectors stay orthonormal
+        assert px == pytest.approx(-uy)
+        assert py == pytest.approx(ux)
+        assert ux * px + uy * py == pytest.approx(0.0, abs=1e-9)
+
+
+def test_project_onto_axis_is_identity_along_its_own_axis():
+    # points laid out exactly along a 30deg axis should have all their
+    # perpendicular (d) coordinate at ~0 relative to the same origin
+    angle = 30.0
+    ux, uy, px, py = axial_unit_vectors(angle)
+    s_true = np.array([-10.0, -5.0, 0.0, 5.0, 10.0])
+    rows = s_true * uy
+    cols = s_true * ux
+    s, d = project_onto_axis(rows, cols, ux, uy, px, py)
+    assert np.allclose(s, s_true, atol=1e-9)
+    assert np.allclose(d, 0.0, atol=1e-9)
+
+
+def test_project_onto_axis_respects_explicit_origin():
+    ux, uy, px, py = axial_unit_vectors(0.0)  # along +x
+    rows, cols = np.array([5.0]), np.array([12.0])
+    s1, d1 = project_onto_axis(rows, cols, ux, uy, px, py, origin_row=5.0, origin_col=2.0)
+    assert s1[0] == pytest.approx(10.0)  # 12 - 2 along +x
+    assert d1[0] == pytest.approx(0.0)   # 5 - 5 perpendicular
 
 
 def test_measure_trace_recovers_known_angle():

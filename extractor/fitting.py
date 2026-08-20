@@ -34,6 +34,7 @@ not the telescope's optical resolution (project notebook 13).
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -221,6 +222,35 @@ def measure_trace(candidate: TraceCandidate, effective_resolution_px: float) -> 
 # Global-referenced contamination removal
 # ---------------------------------------------------------------------------
 
+def axial_unit_vectors(angle_deg: float) -> tuple[float, float, float, float]:
+    """(ux, uy, px, py): unit vector along `angle_deg` (CCW from +x) and
+    its perpendicular, in this project's (col, row) pixel convention.
+    The single shared source of this conversion -- `fragments.py` and
+    `extension.py` both need it too and previously each re-derived it
+    inline (Entry 122 finding 9); any future axial-convention change
+    only needs to happen here."""
+    th = math.radians(angle_deg)
+    ux, uy = math.cos(th), math.sin(th)
+    px, py = -uy, ux
+    return ux, uy, px, py
+
+
+def project_onto_axis(rows, cols, ux, uy, px, py, origin_row=0.0, origin_col=0.0):
+    """Project (rows, cols) onto the (s, d) frame defined by unit vector
+    (ux, uy) [along-axis] and (px, py) [perpendicular], relative to
+    (origin_row, origin_col). s = along-axis position, d = perpendicular
+    offset. The shared primitive behind `_trace_local_frame` (origin =
+    weighted centroid) and `fragments.merge_mask_bridged_fragments`
+    (origin = the absolute pixel-frame origin, so two different
+    fragments' positions stay directly comparable) -- see Entry 122
+    finding 9."""
+    dc = cols - origin_col
+    dr = rows - origin_row
+    s = dc * ux + dr * uy
+    d = dc * px + dr * py
+    return s, d
+
+
 def _trace_local_frame(rows, cols, weights, ref_angle_deg):
     """Project pixel coords into (s, d) relative to ref_angle_deg (not
     necessarily this trace's own fitted angle): s = position along the
@@ -229,13 +259,8 @@ def _trace_local_frame(rows, cols, weights, ref_angle_deg):
     with ref_angle_deg has all pixels at d~0."""
     w = weights / weights.sum()
     mc = np.dot(w, cols); mr = np.dot(w, rows)
-    th = np.radians(ref_angle_deg)
-    ux, uy = np.cos(th), np.sin(th)
-    px, py = -uy, ux
-    dc = cols - mc; dr = rows - mr
-    s = dc * ux + dr * uy
-    d = dc * px + dr * py
-    return s, d
+    ux, uy, px, py = axial_unit_vectors(ref_angle_deg)
+    return project_onto_axis(rows, cols, ux, uy, px, py, origin_row=mr, origin_col=mc)
 
 
 def remove_contamination(

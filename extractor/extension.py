@@ -72,7 +72,7 @@ import numpy as np
 from scipy.ndimage import map_coordinates
 
 from .detection import TraceCandidate, compute_background_residual, downsample_factor
-from .fitting import pca_fit, trace_correlation_length_px
+from .fitting import pca_fit, trace_correlation_length_px, axial_unit_vectors
 
 
 def _perp_cut_window(resid, exclude_mask, origin_row, origin_col, ux, uy, px, py, step_px, D):
@@ -177,8 +177,7 @@ def extend_trace_candidate(
     max_consecutive_nonproductive = max(1, int(math.ceil(max_gap_px / step_px)))
 
     theta0_deg, minor_std0, _ = pca_fit(candidate.rows, candidate.cols, candidate.weights)
-    th0 = math.radians(theta0_deg)
-    ux0, uy0 = math.cos(th0), math.sin(th0)
+    ux0, uy0, _, _ = axial_unit_vectors(theta0_deg)
     s0_all = candidate.cols * ux0 + candidate.rows * uy0
 
     for direction in (+1, -1):
@@ -231,12 +230,11 @@ def extend_trace_candidate(
                 if n_hits_since_refit >= refit_every:
                     rr, cc, ww = np.array(rows_acc), np.array(cols_acc), np.array(weights_acc)
                     theta_r, minor_std, _ = pca_fit(rr, cc, ww)
-                    thr = math.radians(theta_r)
-                    ux_r, uy_r = math.cos(thr), math.sin(thr)
+                    ux_r, uy_r, px_r, py_r = axial_unit_vectors(theta_r)
                     if ux_r * ux + uy_r * uy < 0:  # keep pointing outward through the refit
-                        ux_r, uy_r = -ux_r, -uy_r
+                        ux_r, uy_r, px_r, py_r = -ux_r, -uy_r, -px_r, -py_r
                     ux, uy = ux_r, uy_r
-                    px_, py_ = -uy_r, ux_r
+                    px_, py_ = px_r, py_r
                     D = cut_factor * max(2.0 * minor_std, 1.0)
                     n_hits_since_refit = 0
             else:
@@ -251,7 +249,7 @@ def extend_trace_candidate(
 
     rows_f, cols_f, weights_f = np.array(rows_acc), np.array(cols_acc), np.array(weights_acc)
     theta_deg, minor_std, major_std = pca_fit(rows_f, cols_f, weights_f)
-    th = math.radians(theta_deg); ux, uy = math.cos(th), math.sin(th)
+    ux, uy, _, _ = axial_unit_vectors(theta_deg)
     s = cols_f * ux + rows_f * uy
     return TraceCandidate(
         rows=rows_f, cols=cols_f, weights=weights_f,

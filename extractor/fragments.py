@@ -36,12 +36,10 @@ not tighten them further without re-reading Entries 94/95 first.
 """
 from __future__ import annotations
 
-import math
-
 import numpy as np
 
 from .detection import TraceCandidate
-from .fitting import pca_fit, norm_axial, axial_diff
+from .fitting import pca_fit, norm_axial, axial_diff, axial_unit_vectors, project_onto_axis
 
 
 def merge_mask_bridged_fragments(
@@ -141,14 +139,10 @@ def merge_mask_bridged_fragments(
                 # correctly recognizes them as within tolerance via axial_diff.
                 theta_j_folded = theta_i + axial_diff(theta_j, theta_i)
                 theta = norm_axial((theta_i + theta_j_folded) / 2.0)
-                th = math.radians(theta)
-                ux, uy = math.cos(th), math.sin(th)
-                px, py = -uy, ux
+                ux, uy, px, py = axial_unit_vectors(theta)
 
-                s_i = ci.cols * ux + ci.rows * uy
-                s_j = cj.cols * ux + cj.rows * uy
-                d_i = ci.cols * px + ci.rows * py
-                d_j = cj.cols * px + cj.rows * py
+                s_i, d_i = project_onto_axis(ci.rows, ci.cols, ux, uy, px, py)
+                s_j, d_j = project_onto_axis(cj.rows, cj.cols, ux, uy, px, py)
 
                 perp_offset = abs(np.average(d_i, weights=ci.weights) - np.average(d_j, weights=cj.weights))
                 if perp_offset > max_perp_px:
@@ -194,9 +188,8 @@ def merge_mask_bridged_fragments(
             cols = np.concatenate([ci.cols, cj.cols])
             weights = np.concatenate([ci.weights, cj.weights])
             theta_deg, minor_std, major_std = pca_fit(rows, cols, weights)
-            th = math.radians(theta_deg)
-            ux, uy = math.cos(th), math.sin(th)
-            s = cols * ux + rows * uy
+            ux, uy, _, _ = axial_unit_vectors(theta_deg)
+            s, _ = project_onto_axis(rows, cols, ux, uy, -uy, ux)
             merged = TraceCandidate(
                 rows=rows, cols=cols, weights=weights,
                 length_px=float(s.max() - s.min()),
