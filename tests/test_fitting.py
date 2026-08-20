@@ -3,7 +3,7 @@ import pytest
 
 from extractor.detection import detect_traces
 from extractor.fitting import (
-    axial_diff, axial_unit_vectors, measure_trace, project_onto_axis,
+    TraceMeasurement, axial_diff, axial_unit_vectors, measure_trace, project_onto_axis,
     remove_contamination, trace_correlation_length_px,
 )
 from test_detection import _synthetic_line_image
@@ -40,6 +40,47 @@ def test_project_onto_axis_respects_explicit_origin():
     s1, d1 = project_onto_axis(rows, cols, ux, uy, px, py, origin_row=5.0, origin_col=2.0)
     assert s1[0] == pytest.approx(10.0)  # 12 - 2 along +x
     assert d1[0] == pytest.approx(0.0)   # 5 - 5 perpendicular
+
+
+def test_remove_contamination_weight_reflects_shrinkage_below_original_length():
+    # simulate an extended trace (original_length_px=110, i.e. pre-extension)
+    # whose extension "tips" turn out to be contamination -- a 100px clean
+    # main body (cols 0-99) plus two off-axis tips (cols -15..-1 and
+    # 100..114, offset well off the main line) that remove_contamination
+    # correctly identifies and strips, leaving length_px=99 -- BELOW even
+    # the pre-extension original_length_px=110. Weight must reflect the
+    # shorter, post-removal length here, not stay pinned to the stale
+    # original_length_px (Entry 122 finding 2) -- this is the one case
+    # where the two differ; every extended-but-not-heavily-contaminated
+    # trace keeps the exact pre-fix weight (min() is a no-op there).
+    rng = np.random.default_rng(3)
+    main_cols = np.arange(0, 100, 1.0)
+    main_rows = 100.0 + rng.normal(0, 0.3, size=main_cols.shape)
+    tip1_cols = np.arange(100, 115, 1.0)
+    tip1_rows = np.full_like(tip1_cols, 120.0)
+    tip2_cols = np.arange(-15, 0, 1.0)
+    tip2_rows = np.full_like(tip2_cols, 80.0)
+    cols = np.concatenate([tip2_cols, main_cols, tip1_cols])
+    rows = np.concatenate([tip2_rows, main_rows, tip1_rows])
+    weights = np.ones_like(cols) * 100.0
+
+    measurement = TraceMeasurement(
+        x_center=float(cols.mean()), y_center=float(rows.mean()),
+        theta_pix_deg=0.0, theta_pix_uncertainty_deg=0.1,
+        length_px=130.0, perp_std_px=3.0, n_eff=50.0,
+        eccentricity=0.99, total_flux=float(weights.sum()),
+        weight=1000.0, original_length_px=110.0,
+        _rows=rows, _cols=cols, _weights=weights,
+    )
+
+    result = remove_contamination(measurement, reference_angle_deg=0.0, effective_resolution_px=5.0)
+
+    assert result.n_pixels_removed == 30  # both 15-point tips stripped
+    assert result.length_px < measurement.original_length_px  # the pathological case: shrunk below original
+    expected_weight = (min(measurement.original_length_px, result.length_px) / result.perp_std_px) ** 2
+    assert result.weight == pytest.approx(expected_weight)
+    buggy_old_weight = (measurement.original_length_px / result.perp_std_px) ** 2
+    assert result.weight < buggy_old_weight  # fix never INCREASES weight vs the old behavior
 
 
 def test_measure_trace_recovers_known_angle():

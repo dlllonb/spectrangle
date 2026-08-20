@@ -337,7 +337,19 @@ def remove_contamination(
 
     n_eff = length_px / max(effective_resolution_px, 1e-9)
     sigma = float(analytical_sigma_theta_deg(length_px, minor_std, n_eff))
-    weight_length_px = measurement.original_length_px if measurement.original_length_px is not None else length_px
+    # weight is capped at the CURRENT (post-removal) length_px, not blindly
+    # pinned to original_length_px -- original_length_px still protects
+    # against extension inflating weight (the Entry 109 fix this preserves
+    # exactly, since extension only ever makes length_px >= original_length_px,
+    # so min() is a no-op there), but if contamination removal now shrinks a
+    # trace below even its PRE-extension length, that's new information this
+    # trace is less reliable than it looked before extension ever ran, and
+    # weight should reflect the shorter of the two, not the stale larger one
+    # (Entry 122 finding 2). No effect on any trace that was never extended.
+    if measurement.original_length_px is not None:
+        weight_length_px = min(measurement.original_length_px, length_px)
+    else:
+        weight_length_px = length_px
     weight = (weight_length_px / max(minor_std, 1e-6)) ** 2
 
     return TraceMeasurement(
