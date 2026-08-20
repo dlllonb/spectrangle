@@ -256,7 +256,11 @@ def measure_grating_angle(
     mask_star_x, mask_star_y, mask_radius_used = None, None, None
     catalog_supplied = (star_catalog_ra_deg is not None and star_catalog_dec_deg is not None
                          and star_catalog_mag is not None)
-    if catalog_supplied and wcs is not None:
+    # single source of truth for "is catalog masking active" -- merge_fragments/
+    # extend_traces/sigma_clip are all gated off this same flag, not inferred
+    # separately from whichever masking-derived variable happens to be non-None
+    masking_active = catalog_supplied and wcs is not None
+    if masking_active:
         radius_px = mask_radius_px if mask_radius_px is not None else mask_k * recover_empirical_psf_sigma(image)
         exclude_mask = build_catalog_star_mask(
             image.shape, wcs, star_catalog_ra_deg, star_catalog_dec_deg, star_catalog_mag,
@@ -276,8 +280,8 @@ def measure_grating_angle(
         exclude_mask=exclude_mask,
     )
     n_detected = len(candidates)
-    apply_merge_fragments = merge_fragments and mask_star_x is not None
-    apply_extend_traces = extend_traces and mask_radius_used is not None
+    apply_merge_fragments = merge_fragments and masking_active
+    apply_extend_traces = extend_traces and masking_active
     config.update(merge_fragments=apply_merge_fragments, extend_traces=apply_extend_traces)
     if apply_merge_fragments:
         candidates = merge_mask_bridged_fragments(candidates, mask_star_x, mask_star_y, mask_radius_used)
@@ -311,7 +315,7 @@ def measure_grating_angle(
     # to the bare/unmasked path clips far too aggressively (regressed
     # tests/test_pipeline_real.py, tests/test_pipeline_sim.py, both
     # unmasked, when tried unconditionally).
-    apply_sigma_clip = sigma_clip and mask_radius_used is not None
+    apply_sigma_clip = sigma_clip and masking_active
     config['sigma_clip'] = apply_sigma_clip  # record what actually ran, not the raw request (see docstring)
     final_combined = combine_traces(
         final_measurements, n_boot=n_boot, seed=seed,
