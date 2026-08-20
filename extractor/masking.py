@@ -158,17 +158,20 @@ def build_catalog_star_mask(
         to keep this module's only dependency astropy/numpy/scipy.
     radius_px : float
         Mask disk radius, in pixels. Entry 75 validated k=8 x the
-        image's own `recover_empirical_psf_sigma` as a single fixed
-        choice across all 18 test fields (roughly 4-45x range in local
-        star density) — pass `k * recover_empirical_psf_sigma(image)`
-        unless you have a specific reason to deviate. Entry 72/79/117:
-        avoid radii much larger than this — the distinct, catastrophic
+        image's own `recover_empirical_psf_sigma` across the original 18
+        test fields, but a later 100-random-field batch (Entry 130/132)
+        found k=8 over-masks badly in dense fields -- individual star
+        masks overlap and tile into one near-continuous region, eating
+        far more trace length than necessary. `pipeline.py`'s shipped
+        default is now k=4 (pass `k * recover_empirical_psf_sigma(image)`
+        unless you have a specific reason to deviate). Entry 72/79/117:
+        avoid radii much larger than 8 — the distinct, catastrophic
         over-masking/tiling failure mode was first characterized at
         k=12/16 (Entry 79) but a later full-sweep (Entry 117) found it
         ALREADY onsets catastrophically at k=10 on 2 of 18 fields (one
-        to 14 deg error) — the real safe ceiling is tighter than "2x",
-        somewhere between 8 and 10. This is NOT "bigger is safer," and
-        the margin above 8 is smaller than earlier documentation implied.
+        to 14 deg error), reconfirmed on 4 of 100 random fields (Entry
+        130) — the real safe ceiling is tighter than "2x", somewhere
+        between 8 and 10. This is NOT "bigger is safer."
     mag_cut : float
         Only stars at or brighter than this magnitude are masked
         (default matches Entry 71-75's validated 13.0 — faint enough

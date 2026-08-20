@@ -101,7 +101,7 @@ def measure_grating_angle(
     star_catalog_ra_deg: Optional[np.ndarray] = None,
     star_catalog_dec_deg: Optional[np.ndarray] = None,
     star_catalog_mag: Optional[np.ndarray] = None,
-    mask_k: float = 8.0,
+    mask_k: float = 4.0,
     mask_radius_px: Optional[float] = None,
     mask_mag_cut: float = 13.0,
     merge_fragments: bool = True,
@@ -162,18 +162,22 @@ def measure_grating_angle(
     mask_k : float
         Mask disk radius as a multiple of this image's own empirically
         -recovered PSF sigma (`masking.recover_empirical_psf_sigma`).
-        Default 8.0 is the single fixed value validated across all 18
-        test fields (Entry 75) -- do not increase without re-reading
-        Entry 79 and Entry 117 first: the over-masking/tiling failure
-        (Entry 79) was originally characterized at k=12/16, but a full
-        18-field x 2-seed sweep (Entry 117) found it ALREADY onsets
-        catastrophically at k=10 on 2 of 18 fields (fieldC to 14 deg
-        error, fieldB to 2 deg) -- the safe ceiling is tighter than
-        previously documented, somewhere between 8 and 10, not "roughly
-        2x". A {4,5,6,7,8} sweep (Entry 117) found no pooled improvement
-        over 8.0 worth switching to (k=7 ties it within noise; k=5/6 are
-        non-monotonically worse, likely a real but unexplained effect,
-        not just 2-seed noise -- not yet investigated).
+        Default 4.0 (changed from 8.0, Entry 130/132): an overnight
+        100-random-field generalization batch found k=8 (tuned on only
+        the original 18 fixed fields, Entry 75/117) over-masks densely
+        starred fields badly enough to erase the advantage it was
+        chosen for -- at high density, individual k=8 star masks
+        (radius ~8x the PSF sigma) overlap and tile into one
+        near-continuous masked region, eating far more trace length
+        than necessary (visually confirmed, Entry 132: on the densest
+        field in that batch, k=8 kept 11/18 detected traces at
+        err=-0.058deg, k=4 kept 27/36 at err=-0.002deg). k=4 beat k=8 in
+        61/100 random fields (p=0.001, survives a leverage check),
+        concentrated in dense fields. Do not increase past 8 without
+        re-reading Entry 79 and Entry 117 first: the over-masking/tiling
+        failure reproduces catastrophically at k=10 (2/18 original
+        fields, 4/100 random fields, up to 7.4-14 deg error) -- the safe
+        ceiling is well under "roughly 2x" the working value.
     mask_radius_px : float, optional
         Overrides `mask_k` with an explicit pixel radius, skipping the
         empirical PSF recovery step.
