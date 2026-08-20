@@ -99,10 +99,12 @@ def _perp_cut_window(resid, exclude_mask, origin_row, origin_col, ux, uy, px, py
 
 
 def _central_band(n_d):
-    """Column bounds (lo, hi) of the middle third of d-bins, shared by
-    `_hump_test` (which tests it) and the caller (which must only KEEP
-    pixels from the same band that was actually tested -- see
-    `extend_trace_candidate`'s keep-mask, Entry 122 finding 6)."""
+    """Column bounds (lo, hi) of the middle third of d-bins -- used by
+    `_hump_test`'s own "centered" check. (Entry 122 finding 6 once also
+    used this to restrict `extend_trace_candidate`'s keep-mask to only
+    the central band; that restriction was reverted after a 100-field
+    validation showed it discarding real signal too often -- see the
+    note in `extend_trace_candidate`.)"""
     third = max(1, n_d // 3)
     return third, n_d - third
 
@@ -201,23 +203,30 @@ def extend_trace_candidate(
             if masked_frac < 0.5:
                 hit = _hump_test(values_grid, ext_sigma, median, std)
                 if hit:
-                    # only keep pixels from the SAME central band _hump_test
-                    # validated -- the outer thirds are exactly what the hump
-                    # test's "centered" check was built to distrust, so a
-                    # per-pixel-significant sample out there shouldn't be
-                    # folded into the accumulated trace cloud (Entry 122
-                    # finding 6)
-                    band_lo, band_hi = _central_band(values_grid.shape[1])
-                    band_mask = np.zeros_like(values_grid, dtype=bool)
-                    band_mask[:, band_lo:band_hi] = True
                     # decimate the OUTPUT point cloud to the same grid density
-                    # detect_traces itself fits from (see comment above) --
+                    # detect_traces itself fits from (Entry 122 finding 7) --
                     # does not affect the hit-test, which already ran on the
-                    # full-resolution values_grid
+                    # full-resolution values_grid. Empirically validated
+                    # (2026-08-20, 100-field batch): a real, positive effect
+                    # alone.
+                    #
+                    # NOTE: an earlier version of this fix ALSO restricted
+                    # `keep` to only the central d-band _hump_test validated
+                    # (Entry 122 finding 6, on the theory that the outer
+                    # thirds were more likely to be off-axis contamination).
+                    # That theory did NOT hold up under direct measurement --
+                    # a 100-field validation batch showed it substantially
+                    # WORSENED pooled accuracy (mean|err| 0.037 -> 0.124 deg
+                    # on a 10-field worst-case subset when combined with
+                    # decimation), because the outer thirds legitimately
+                    # contain real trace signal often enough (D is sized
+                    # generously via cut_factor) that discarding them lost
+                    # more good data than it excluded contamination. Reverted
+                    # -- see new_results.txt for the full bisection.
                     decimate_mask = np.zeros_like(values_grid, dtype=bool)
                     decimate_mask[::factor, ::factor] = True
                     flat_vals = values_grid.ravel(); flat_rows = rows_grid.ravel(); flat_cols = cols_grid.ravel()
-                    keep = (flat_vals >= threshold) & band_mask.ravel() & decimate_mask.ravel()
+                    keep = (flat_vals >= threshold) & decimate_mask.ravel()
                     if keep.any():
                         rows_acc.extend(flat_rows[keep].tolist())
                         cols_acc.extend(flat_cols[keep].tolist())

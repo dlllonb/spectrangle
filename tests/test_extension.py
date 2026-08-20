@@ -107,14 +107,14 @@ def test_central_band_matches_hump_test_thirds():
     assert (lo, hi) == (3, 6)  # middle third of 9 columns
 
 
-def test_extension_does_not_add_pixels_outside_the_central_band():
+def test_hump_test_rejects_an_off_center_only_bump():
     # a window with strong flux in an OUTER third but nothing in the
-    # central band must not be a hit (existing "centered" check) --
-    # and even a genuine hit only keeps central-band pixels (Entry 122
-    # finding 6): construct a grid where the outer third alone would
-    # individually clear a per-pixel threshold, confirm none of those
-    # coordinates ever reach a keep-mask by checking _hump_test rejects
-    # an off-center-only bump outright.
+    # central band must not be a hit -- the pre-existing "centered" check
+    # (unrelated to, and NOT reverted along with, Entry 122 finding 6's
+    # keep-mask restriction below -- that restriction was found to
+    # discard real signal too often and was reverted after a 100-field
+    # validation, see the note in extend_trace_candidate; this "centered"
+    # rejection in _hump_test itself is original, unchanged behavior).
     n_s, n_d = 5, 9
     values_grid = np.zeros((n_s, n_d))
     values_grid[:, :3] = 50.0  # bright, but in the outer (non-central) third
