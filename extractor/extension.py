@@ -71,7 +71,7 @@ from typing import Optional
 import numpy as np
 from scipy.ndimage import map_coordinates
 
-from .detection import TraceCandidate, compute_background_residual
+from .detection import TraceCandidate, compute_background_residual, downsample_factor
 from .fitting import pca_fit, trace_correlation_length_px
 
 
@@ -98,6 +98,15 @@ def _perp_cut_window(resid, exclude_mask, origin_row, origin_col, ux, uy, px, py
     return (values.reshape(n_s, n_d), rows.reshape(n_s, n_d), cols.reshape(n_s, n_d), masked_frac)
 
 
+def _central_band(n_d):
+    """Column bounds (lo, hi) of the middle third of d-bins, shared by
+    `_hump_test` (which tests it) and the caller (which must only KEEP
+    pixels from the same band that was actually tested -- see
+    `extend_trace_candidate`'s keep-mask, Entry 122 finding 6)."""
+    third = max(1, n_d // 3)
+    return third, n_d - third
+
+
 def _hump_test(values_grid, ext_sigma, median, std):
     """values_grid: (n_s, n_d) sampled residual for one step's window.
     Central band = middle third of d-bins. HIT if the central band's
@@ -105,13 +114,15 @@ def _hump_test(values_grid, ext_sigma, median, std):
     brightest of 3 equal d-thirds is the central one (rejects "elevated
     somewhere in the window but off the trace line")."""
     n_s, n_d = values_grid.shape
-    third = max(1, n_d // 3)
-    lo, hi = third, n_d - third
+    lo, hi = _central_band(n_d)
     central = values_grid[:, lo:hi]
     n_central = central.size
-    if n_central == 0:
+    if n_central == 0 or std <= 1e-9:
+        # no real background variation to test against (a degenerate/near-
+        # noiseless patch) -- treat as "can't tell", not as an automatic hit
         return False
     z = (central.sum() - n_central * median) / (std * math.sqrt(n_central))
+    third = lo
     thirds = [values_grid[:, :third].mean(), values_grid[:, third:hi].mean(), values_grid[:, hi:].mean()]
     centered = int(np.argmax(thirds)) == 1
     return bool(z >= ext_sigma and centered)
@@ -148,6 +159,14 @@ def extend_trace_candidate(
     if step_px is None:
         step_px = trace_correlation_length_px(image_shape, smooth_sigma=2.5)
     ny, nx = image_shape
+    # detection.detect_traces fits the ORIGINAL candidate's pixels on its own
+    # internally-downsampled grid (factor apart in each axis); _perp_cut_window
+    # below samples at roughly full resolution for walker sensitivity, so
+    # without decimating what actually gets ADDED to the point cloud, a
+    # modest extension segment could numerically outnumber the original
+    # detection in the final weighted PCA fit (Entry 122 finding 7) -- only
+    # the accumulated-cloud density is decimated, not the hit-test itself.
+    factor = downsample_factor(image_shape)
 
     rows_acc = list(map(float, candidate.rows))
     cols_acc = list(map(float, candidate.cols))
@@ -183,8 +202,23 @@ def extend_trace_candidate(
             if masked_frac < 0.5:
                 hit = _hump_test(values_grid, ext_sigma, median, std)
                 if hit:
+                    # only keep pixels from the SAME central band _hump_test
+                    # validated -- the outer thirds are exactly what the hump
+                    # test's "centered" check was built to distrust, so a
+                    # per-pixel-significant sample out there shouldn't be
+                    # folded into the accumulated trace cloud (Entry 122
+                    # finding 6)
+                    band_lo, band_hi = _central_band(values_grid.shape[1])
+                    band_mask = np.zeros_like(values_grid, dtype=bool)
+                    band_mask[:, band_lo:band_hi] = True
+                    # decimate the OUTPUT point cloud to the same grid density
+                    # detect_traces itself fits from (see comment above) --
+                    # does not affect the hit-test, which already ran on the
+                    # full-resolution values_grid
+                    decimate_mask = np.zeros_like(values_grid, dtype=bool)
+                    decimate_mask[::factor, ::factor] = True
                     flat_vals = values_grid.ravel(); flat_rows = rows_grid.ravel(); flat_cols = cols_grid.ravel()
-                    keep = flat_vals >= threshold
+                    keep = (flat_vals >= threshold) & band_mask.ravel() & decimate_mask.ravel()
                     if keep.any():
                         rows_acc.extend(flat_rows[keep].tolist())
                         cols_acc.extend(flat_cols[keep].tolist())

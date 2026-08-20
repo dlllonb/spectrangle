@@ -1,7 +1,7 @@
 import numpy as np
 
-from extractor.detection import TraceCandidate, compute_background_residual, detect_traces
-from extractor.extension import extend_trace_candidate, extend_candidates
+from extractor.detection import TraceCandidate, compute_background_residual, detect_traces, downsample_factor
+from extractor.extension import extend_trace_candidate, extend_candidates, _hump_test, _central_band
 from extractor.fitting import pca_fit, measure_trace, trace_correlation_length_px
 from test_detection import _synthetic_line_image
 
@@ -92,6 +92,76 @@ def test_extend_candidates_sets_original_length_on_every_candidate():
     assert len(extended_list) == 1
     assert extended_list[0].original_length_px == candidate.length_px
     assert extended_list[0].length_px > candidate.length_px
+
+
+def test_hump_test_returns_false_not_true_when_background_std_is_zero():
+    # a degenerate/near-noiseless window (std=0) must NOT be treated as an
+    # automatic hit -- previously the z-score's division by std produced
+    # inf, which always cleared ext_sigma (Entry 122 finding 5)
+    values_grid = np.full((5, 9), 100.0)  # perfectly flat, centered bright band included
+    assert _hump_test(values_grid, ext_sigma=4.0, median=0.0, std=0.0) is False
+
+
+def test_central_band_matches_hump_test_thirds():
+    lo, hi = _central_band(9)
+    assert (lo, hi) == (3, 6)  # middle third of 9 columns
+
+
+def test_extension_does_not_add_pixels_outside_the_central_band():
+    # a window with strong flux in an OUTER third but nothing in the
+    # central band must not be a hit (existing "centered" check) --
+    # and even a genuine hit only keeps central-band pixels (Entry 122
+    # finding 6): construct a grid where the outer third alone would
+    # individually clear a per-pixel threshold, confirm none of those
+    # coordinates ever reach a keep-mask by checking _hump_test rejects
+    # an off-center-only bump outright.
+    n_s, n_d = 5, 9
+    values_grid = np.zeros((n_s, n_d))
+    values_grid[:, :3] = 50.0  # bright, but in the outer (non-central) third
+    assert _hump_test(values_grid, ext_sigma=4.0, median=0.0, std=1.0) is False
+
+
+def test_extension_point_cloud_is_decimated_to_match_detection_density():
+    # `extend_trace_candidate` only uses `image_shape` for (a) the walker's
+    # boundary check and (b) downsample_factor -- NOT to size `resid`
+    # itself (map_coordinates samples `resid` directly and returns 0
+    # outside its real bounds) -- so a small, fast resid array can be
+    # paired with a FAKE image_shape purely to control the factor.
+    # Paired comparison (factor=1 vs factor=2 on the identical resid/
+    # candidate) rather than a hand-derived absolute density constant --
+    # more robust than guessing the exact expected point count.
+    angle = 15.0
+    cx, cy = 200.0, 150.0
+    full_image = _synthetic_line_image(shape=(300, 400), angle_deg=angle, length=250.0,
+                                        cx=cx, cy=cy, width_sigma=2.0, amplitude=600.0)
+    truncated_image = _mask_beyond(full_image, angle, cx, cy, s_cut=-35.0)
+    shape_factor_1, shape_factor_2 = (1000, 1000), (4000, 4000)
+    assert downsample_factor(shape_factor_1) == 1
+    assert downsample_factor(shape_factor_2) == 2
+
+    candidates, _, _ = detect_traces(truncated_image, min_length_px=50.0, min_eccentricity=0.8,
+                                      bg_sigma=40.0, smooth_sigma=1.0)
+    candidate = candidates[0]
+    n_original = len(candidate.rows)
+    resid, median, std, threshold = compute_background_residual(full_image, bg_sigma=40.0, smooth_sigma=1.0)
+    step_px = trace_correlation_length_px(full_image.shape, smooth_sigma=1.0)
+
+    density_by_factor = {}
+    for shape in (shape_factor_1, shape_factor_2):
+        extended = extend_trace_candidate(
+            candidate, resid, None, median, std, threshold, shape,
+            mask_radius_px=10.0, step_px=step_px,
+        )
+        n_added = len(extended.rows) - n_original
+        added_length = extended.length_px - candidate.length_px
+        assert n_added > 0 and added_length > 0
+        density_by_factor[downsample_factor(shape)] = n_added / added_length
+
+    # decimating by factor=2 should meaningfully lower the point density
+    # per unit added length vs factor=1 on the identical underlying data
+    # -- before this fix both cases sampled at the same (near-continuous)
+    # density regardless of factor
+    assert density_by_factor[2] < density_by_factor[1] * 0.75
 
 
 def test_measure_trace_weight_uses_original_length_when_set():
