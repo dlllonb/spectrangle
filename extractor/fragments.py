@@ -132,7 +132,15 @@ def merge_mask_bridged_fragments(
                 if abs(axial_diff(theta_i, theta_j)) > angle_tol_deg:
                     continue
 
-                theta = norm_axial((theta_i + theta_j) / 2.0) if abs(axial_diff(theta_i, theta_j)) < 90 else theta_i
+                # Proper axial mean of two angles: fold theta_j onto the branch
+                # nearest theta_i (axial_diff always returns a value in (-90,90]),
+                # THEN average -- naive (theta_i+theta_j)/2 is wrong whenever the
+                # two angles straddle the +/-90 branch cut (e.g. 89.5 and -89.5
+                # describe nearly the same direction but naively average to 0.0,
+                # not ~90) even though the angle_tol_deg gate above already
+                # correctly recognizes them as within tolerance via axial_diff.
+                theta_j_folded = theta_i + axial_diff(theta_j, theta_i)
+                theta = norm_axial((theta_i + theta_j_folded) / 2.0)
                 th = math.radians(theta)
                 ux, uy = math.cos(th), math.sin(th)
                 px, py = -uy, ux
