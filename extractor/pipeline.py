@@ -67,7 +67,11 @@ class AngleExtractionResult:
     initial_combined : CombinedAngleResult
         The pre-contamination-removal combine, kept for diagnostics.
     config : dict
-        The parameters actually used, for reproducibility.
+        The parameters actually used, for reproducibility. `sigma_clip`,
+        `merge_fragments`, `extend_traces` reflect whether each actually
+        ran (all are silently gated off when catalog masking isn't
+        active, same scoping pattern throughout this module) -- not
+        just the raw requested argument.
     """
     theta_pix_deg: float
     theta_pix_uncertainty_deg: float
@@ -272,9 +276,12 @@ def measure_grating_angle(
         exclude_mask=exclude_mask,
     )
     n_detected = len(candidates)
-    if merge_fragments and mask_star_x is not None:
+    apply_merge_fragments = merge_fragments and mask_star_x is not None
+    apply_extend_traces = extend_traces and mask_radius_used is not None
+    config.update(merge_fragments=apply_merge_fragments, extend_traces=apply_extend_traces)
+    if apply_merge_fragments:
         candidates = merge_mask_bridged_fragments(candidates, mask_star_x, mask_star_y, mask_radius_used)
-    if extend_traces and mask_radius_used is not None:
+    if apply_extend_traces:
         candidates = extend_candidates(
             candidates, image, exclude_mask, mask_radius_used,
             bg_sigma=bg_sigma, smooth_sigma=smooth_sigma, n_sigma=n_sigma,
@@ -305,6 +312,7 @@ def measure_grating_angle(
     # tests/test_pipeline_real.py, tests/test_pipeline_sim.py, both
     # unmasked, when tried unconditionally).
     apply_sigma_clip = sigma_clip and mask_radius_used is not None
+    config['sigma_clip'] = apply_sigma_clip  # record what actually ran, not the raw request (see docstring)
     final_combined = combine_traces(
         final_measurements, n_boot=n_boot, seed=seed,
         sigma_clip=apply_sigma_clip, sigma_clip_k=sigma_clip_k,
